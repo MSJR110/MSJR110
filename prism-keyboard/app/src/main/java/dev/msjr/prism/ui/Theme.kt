@@ -46,7 +46,7 @@ class Theme(
     val modTint: Int = if (dark) (keyColor ?: Color.WHITE).let { Color.argb(14, Color.red(it), Color.green(it), Color.blue(it)) }
     else Color.argb(64, 236, 240, 248)
     /** wash laid over the backdrop so labels stay readable */
-    val veil: Int = if (dark) Color.argb(46, 4, 6, 14) else Color.argb(56, 255, 255, 255)
+    val veil: Int = if (dark) Color.argb(46, 4, 6, 14) else Color.argb(30, 255, 255, 255)
     val shadow: Int = if (dark) Color.argb(80, 0, 0, 0) else Color.argb(30, 30, 40, 80)
     val rimTop: Int = if (dark) Color.argb(150, 255, 255, 255) else Color.argb(255, 255, 255, 255)
     val rimBottom: Int = if (dark) Color.argb(36, 255, 255, 255) else Color.argb(70, 120, 130, 160)
@@ -111,7 +111,7 @@ class Theme(
             Theme("holo", "هولوگرام", "Holo", false,
                 intArrayOf(c(0xFFF7F4FF), c(0xFFEDF5FF)),
                 intArrayOf(c(0xFFFFB5E8), c(0xFFB5F2FF), c(0xFFFFF0A8), c(0xFFC5B5FF)),
-                c(0xFF7C5CFF), Backdrop.PRISM),
+                c(0xFF7C5CFF), Backdrop.PRISM, vivid = 1.4f),
             Theme("lavender", "یاس", "Lilac", false,
                 intArrayOf(c(0xFFF4EFFF), c(0xFFE9E4FA)),
                 intArrayOf(c(0xFFC4B5FD), c(0xFFF0ABFC), c(0xFFA5B4FC), c(0xFFDDD6FE)),

@@ -106,16 +106,16 @@ object ThemeArt {
         c.restore()
         // stars
         p.shader = null
-        val n = (W * H / (1500f * d * d)).toInt().coerceIn(30, 400)
+        val n = (W * H / (650f * d * d)).toInt().coerceIn(40, 700)
         for (i in 0 until n) {
             val x = rnd.nextFloat() * W; val y = rnd.nextFloat() * H
-            val big = rnd.nextFloat() < 0.07f
+            val big = rnd.nextFloat() < 0.09f
             val r = (if (big) 0.9f + rnd.nextFloat() * 0.7f else 0.35f + rnd.nextFloat() * 0.6f) * d
             val tint = if (rnd.nextFloat() < 0.25f) th.blobs[rnd.nextInt(th.blobs.size)] else Color.WHITE
             val col = Theme.blend(Color.WHITE, tint, 0.35f)
             if (big) glow(c, p, x, y, r * 6f, col, 0.35f, W, H)
             p.shader = null
-            p.color = withAlpha(col, 0.45f + rnd.nextFloat() * 0.5f)
+            p.color = withAlpha(col, 0.55f + rnd.nextFloat() * 0.45f)
             c.drawCircle(x, y, r, p)
         }
     }
@@ -185,7 +185,7 @@ object ThemeArt {
         // diagonal holographic bands
         val spectrum = intArrayOf(0xFFFFB5E8.toInt(), 0xFFFFD6A5.toInt(), 0xFFFDFFB6.toInt(), 0xFFCAFFBF.toInt(),
             0xFF9BF6FF.toInt(), 0xFFA0C4FF.toInt(), 0xFFBDB2FF.toInt(), 0xFFFFB5E8.toInt())
-        val cols = IntArray(spectrum.size) { withAlpha(spectrum[it], 0.42f * boost) }
+        val cols = IntArray(spectrum.size) { withAlpha(spectrum[it], 0.6f * boost) }
         p.shader = LinearGradient(0f, H, W * 0.55f, -H * 0.2f, cols, null, Shader.TileMode.MIRROR)
         c.drawRect(0f, 0f, W, H, p)
         // two glossy highlights

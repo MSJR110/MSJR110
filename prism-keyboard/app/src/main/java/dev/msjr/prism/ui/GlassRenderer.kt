@@ -175,7 +175,7 @@ class GlassRenderer(private val ctx: Context) {
         }
         if (!drawn) {
             // frosted fallback: translucent body + a top sheen
-            val base = if (theme.dark) 0.16f else 0.62f
+            val base = if (theme.dark) 0.16f else 0.44f
             val a = ((base + tintAlpha * 0.5f + press * 0.18f).coerceIn(0f, 1f) * 255).toInt()
             fillPaint.shader = null
             fillPaint.color = Color.argb(a, Color.red(tint), Color.green(tint), Color.blue(tint))
@@ -235,7 +235,7 @@ class GlassRenderer(private val ctx: Context) {
             runtimeBroken = true
         }
         // frosted fallback: bubble + neck + key as one path
-        val a = ((if (theme.dark) 0.16f else 0.62f) + tintAlpha * 0.5f).coerceIn(0f, 1f)
+        val a = ((if (theme.dark) 0.16f else 0.44f) + tintAlpha * 0.5f).coerceIn(0f, 1f)
         fillPaint.shader = null
         fillPaint.color = Color.argb((a * 255).toInt(), Color.red(tint), Color.green(tint), Color.blue(tint))
         balloonPath.reset()
