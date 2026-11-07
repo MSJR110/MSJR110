@@ -239,6 +239,21 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
         resync()
         updateShift()
         updateSuggestions()
+        applyBackDisposition()
+    }
+
+    override fun onWindowShown() {
+        super.onWindowShown()
+        applyBackDisposition()
+    }
+
+    /**
+     * The system draws a ⌄ "hide keyboard" button under every keyboard. Telling it our back
+     * handling is "adjust nothing" makes it leave that button out (the back gesture still closes
+     * the keyboard, and Prism has its own ⌄ in the toolbar).
+     */
+    private fun applyBackDisposition() {
+        setBackDisposition(if (settings.hideNavBack) BACK_DISPOSITION_ADJUST_NOTHING else BACK_DISPOSITION_DEFAULT)
     }
 
     override fun onFinishInputView(finishingInput: Boolean) {
@@ -262,6 +277,7 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
         if (key == "bg_version") glass.resetBackdrop()
         applyFeedbackSettings()
         applyLook()
+        applyBackDisposition()
     }
 
     // ------------------------------------------------------------------ layout

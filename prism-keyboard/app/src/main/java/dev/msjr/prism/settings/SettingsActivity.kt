@@ -141,6 +141,13 @@ class SettingsActivity : Activity() {
             c.addView(toggle("نور زیر انگشت", "یه هاله‌ی نرم دنبال انگشتت میاد", Prefs.GLOW, true))
             c.addView(slider("ارتفاع کیبورد", Prefs.HEIGHT, 100, 80, 130, suffix = "٪"))
             c.addView(toggle("ردیف اعداد", "یه ردیف عدد بالای حروف", Prefs.NUMBER_ROW, false))
+            c.addView(toggle("بدون دکمه‌ی ⌄ زیر کیبورد", "دکمه‌ی بستن سیستم رو برمی‌داره؛ برای بستن از ⌄ بالای کیبورد یا حرکت برگشت استفاده کن", Prefs.HIDE_NAV_BACK, true))
+            c.addView(button("برداشتن دکمه‌ی ⌨ زیر کیبورد") {
+                toast("بقیه‌ی کیبوردها (مثل کیبورد سامسونگ) رو خاموش کن تا فقط Prism بمونه")
+                try {
+                    startActivity(Intent(android.provider.Settings.ACTION_INPUT_METHOD_SETTINGS))
+                } catch (_: Throwable) { }
+            })
             c.addView(toggle("پیش‌نمایش حباب کلید", "حباب بزرگ بالای کلید موقع لمس", Prefs.KEY_PREVIEW, true))
             c.addView(label("فونت کلیدها"))
             c.addView(chips(Prefs.FONT, listOf("vazir" to "وزیرمتن", "system" to "فونت گوشی"), "vazir"))

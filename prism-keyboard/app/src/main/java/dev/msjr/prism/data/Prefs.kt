@@ -43,6 +43,7 @@ object Prefs {
     const val TOUCH_OFFSET_Y = "touch_off_y"
     const val SWIPE_DELETE = "swipe_delete"
     const val GLOW = "glow"
+    const val HIDE_NAV_BACK = "hide_nav_back"   // hide the system ⌄ under the keyboard
 
     fun get(ctx: Context): SharedPreferences =
         ctx.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE)
@@ -78,6 +79,7 @@ object Prefs {
             font = p.getString(FONT, "vazir") ?: "vazir",
             swipeDelete = p.getBoolean(SWIPE_DELETE, true),
             glow = p.getBoolean(GLOW, true),
+            hideNavBack = p.getBoolean(HIDE_NAV_BACK, true),
         )
     }
 }
@@ -111,4 +113,5 @@ data class Settings(
     val font: String,
     val swipeDelete: Boolean,
     val glow: Boolean,
+    val hideNavBack: Boolean,
 )
