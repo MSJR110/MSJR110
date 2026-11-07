@@ -221,7 +221,9 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
     fun applySettings(s: Settings, font: Typeface, fontBold: Typeface) {
         settings = s
         typeface = font; typefaceBold = fontBold
-        rowPitch = 56f * dp * (s.heightPct / 100f)
+        val landscape = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
+        rowPitch = 56f * dp * (s.heightPct / 100f) * (if (landscape) 0.7f else 1f)
+        stripH = (if (landscape) 38f else 46f) * dp
         showSuggestions = s.suggestions
         requestLayout()
         invalidate()

@@ -236,7 +236,7 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
             refreshClipChip()
         }
         rebuildLayout()
-        if (!restarting) resync() else resync()
+        resync()
         updateShift()
         updateSuggestions()
     }

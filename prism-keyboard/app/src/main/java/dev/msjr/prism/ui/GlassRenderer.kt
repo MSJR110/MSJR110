@@ -38,6 +38,10 @@ class GlassRenderer(private val ctx: Context) {
     private val backdropMatrix = Matrix()
     private var backdropTop = 0f
     private var backdropKey = ""
+    private var bW = 0
+    private var bH = 0
+    private var bMode = ""
+    private var bStrength = -1f
 
     private val runtime: RuntimeShader? = createRuntimeShader()
     private val glassPaint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -50,7 +54,8 @@ class GlassRenderer(private val ctx: Context) {
     private val tmp = RectF()
     private val glowPaint = Paint(Paint.ANTI_ALIAS_FLAG)
 
-    val usesRefraction: Boolean get() = runtime != null && refractionWanted
+    private var runtimeBroken = false
+    val usesRefraction: Boolean get() = runtime != null && refractionWanted && !runtimeBroken
 
     fun configure(theme: Theme, glassStrength: Int, refraction: Boolean) {
         val changed = theme.id != this.theme.id
@@ -74,10 +79,10 @@ class GlassRenderer(private val ctx: Context) {
      */
     fun ensureBackdrop(width: Int, height: Int, top: Float, mode: String) {
         if (width <= 0 || height <= 0) return
-        val key = "${theme.id}|$width|$height|$mode|${strength}"
         backdropTop = top
-        if (key != backdropKey || backdrop == null) {
-            backdropKey = key
+        if (backdrop == null || backdropKey.isEmpty() || width != bW || height != bH || mode != bMode || strength != bStrength) {
+            bW = width; bH = height; bMode = mode; bStrength = strength
+            backdropKey = theme.id
             backdrop?.recycle()
             val bmp = (if (mode == "image") loadImageBackdrop(width, height) else null)
                 ?: makeAurora(width, height)
@@ -87,7 +92,9 @@ class GlassRenderer(private val ctx: Context) {
         backdropMatrix.setTranslate(0f, top)
         backdropShader?.setLocalMatrix(backdropMatrix)
         runtime?.let { rs ->
-            backdropShader?.let { if (Build.VERSION.SDK_INT >= 33) rs.setInputShader("bg", it) }
+            backdropShader?.let {
+                if (Build.VERSION.SDK_INT >= 33) try { rs.setInputShader("bg", it) } catch (_: Throwable) { runtimeBroken = true }
+            }
         }
     }
 
@@ -125,7 +132,8 @@ class GlassRenderer(private val ctx: Context) {
         }
 
         val rs = runtime
-        if (rs != null && refractionWanted && Build.VERSION.SDK_INT >= 33 && backdropShader != null) {
+        var drawn = false
+        if (rs != null && !runtimeBroken && refractionWanted && Build.VERSION.SDK_INT >= 33 && backdropShader != null) try {
             rs.setFloatUniform("center", tmp.centerX(), tmp.centerY())
             rs.setFloatUniform("halfSize", tmp.width() / 2f, tmp.height() / 2f)
             rs.setFloatUniform("radius", min(rad, min(tmp.width(), tmp.height()) / 2f))
@@ -136,7 +144,12 @@ class GlassRenderer(private val ctx: Context) {
             rs.setFloatUniform("dark", if (theme.dark) 1f else 0f)
             glassPaint.shader = rs
             canvas.drawRect(tmp.left - 2f, tmp.top - 2f, tmp.right + 2f, tmp.bottom + 2f, glassPaint)
-        } else {
+            drawn = true
+        } catch (t: Throwable) {
+            Log.w(TAG, "glass shader failed, using frosted fallback", t)
+            runtimeBroken = true
+        }
+        if (!drawn) {
             // frosted fallback: translucent body + a top sheen
             val base = if (theme.dark) 0.16f else 0.62f
             val a = ((base + tintAlpha * 0.5f + press * 0.18f).coerceIn(0f, 1f) * 255).toInt()

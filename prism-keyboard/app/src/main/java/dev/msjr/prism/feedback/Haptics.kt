@@ -32,18 +32,25 @@ class Haptics(ctx: Context) {
             keyEffect = null; modEffect = null; tickEffect = null; heavyEffect = null
             return
         }
-        keyEffect = build(VibrationEffect.Composition.PRIMITIVE_CLICK, 0.35f + 0.65f * strength, 6 + (strength * 16).toInt())
-        modEffect = build(VibrationEffect.Composition.PRIMITIVE_CLICK, 0.45f + 0.55f * strength, 8 + (strength * 18).toInt())
-        tickEffect = build(VibrationEffect.Composition.PRIMITIVE_TICK, 0.25f + 0.55f * strength, 4 + (strength * 6).toInt())
-        heavyEffect = build(VibrationEffect.Composition.PRIMITIVE_THUD, 0.4f + 0.6f * strength, 14 + (strength * 20).toInt())
+        val light = strength < 0.4f
+        keyEffect = build(VibrationEffect.Composition.PRIMITIVE_CLICK, 0.35f + 0.65f * strength, 6 + (strength * 16).toInt(),
+            if (light) VibrationEffect.EFFECT_TICK else VibrationEffect.EFFECT_CLICK)
+        modEffect = build(VibrationEffect.Composition.PRIMITIVE_CLICK, 0.45f + 0.55f * strength, 8 + (strength * 18).toInt(),
+            VibrationEffect.EFFECT_CLICK)
+        tickEffect = build(VibrationEffect.Composition.PRIMITIVE_TICK, 0.25f + 0.55f * strength, 4 + (strength * 6).toInt(),
+            VibrationEffect.EFFECT_TICK)
+        heavyEffect = build(VibrationEffect.Composition.PRIMITIVE_THUD, 0.4f + 0.6f * strength, 14 + (strength * 20).toInt(),
+            VibrationEffect.EFFECT_HEAVY_CLICK)
     }
 
-    private fun build(primitive: Int, scale: Float, fallbackMs: Int): VibrationEffect? {
+    private fun build(primitive: Int, scale: Float, fallbackMs: Int, predefined: Int): VibrationEffect? {
         val v = vibrator ?: return null
         try {
             if (Build.VERSION.SDK_INT >= 30 && v.areAllPrimitivesSupported(primitive)) {
                 return VibrationEffect.startComposition().addPrimitive(primitive, scale.coerceIn(0f, 1f)).compose()
             }
+            // Samsung & co. map these to their own carefully tuned haptic patterns
+            if (Build.VERSION.SDK_INT >= 29) return VibrationEffect.createPredefined(predefined)
         } catch (_: Throwable) { }
         val amp = if (v.hasAmplitudeControl()) (40 + 215 * scale).toInt().coerceIn(1, 255) else VibrationEffect.DEFAULT_AMPLITUDE
         return VibrationEffect.createOneShot(fallbackMs.toLong(), amp)

@@ -46,9 +46,9 @@ object Layouts {
             rows += Row(r1.mapIndexed { i, c -> enKey(c.toString(), if (numberRow) null else EN_DIGITS[i].toString()) })
             rows += Row("asdfghjkl".map { enKey(it.toString(), null) }, indent = 0.5f)
             rows += Row(
-                listOf(Key(KeyType.SHIFT, "shift", width = 1.4f)) +
+                listOf(Key(KeyType.SHIFT, "shift", width = 1.5f)) +
                     "zxcvbnm".map { enKey(it.toString(), null) } +
-                    listOf(Key(KeyType.DELETE, "del", width = 1.4f)),
+                    listOf(Key(KeyType.DELETE, "del", width = 1.5f)),
             )
             rows += bottomRow(fa = false, kind = kind, units = 10f, page = Page.LETTERS)
             return KeyboardLayout("en", rows, rtl = false, units = 10f)
