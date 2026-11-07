@@ -583,7 +583,8 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         var left = k.rect.left - 4 * dp
         if (left + w > width - 2 * dp) left = width - 2 * dp - w
         if (left < 2 * dp) left = 2 * dp
-        var top = k.rect.top - 6 * dp - h
+        // sits right on the key so the two melt into one balloon
+        var top = k.rect.top + 1 * dp - h
         if (top < 2 * dp) top = 2 * dp
         popupRect.set(left, top, left + w, top + h)
     }
@@ -602,12 +603,11 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
     private fun drawPopup(canvas: Canvas, p: Ptr, th: Theme) {
         val items = popupItems(p)
         if (items.isEmpty()) return
-        val bubbleTint = if (th.dark) Color.rgb(70, 72, 90) else Color.WHITE
-        val sc = 0.85f + 0.15f * popupAnim
-        val cx = popupRect.centerX(); val cy = popupRect.bottom
+        val bubbleTint = if (th.dark) Color.rgb(104, 106, 122) else Color.WHITE
         canvas.save()
-        canvas.scale(sc, sc, cx, cy)
-        glass.drawGlass(canvas, popupRect, 16 * dp, 0.2f, bubbleTint, if (th.dark) 0.78f else 0.92f)
+        val k = p.key
+        if (k != null) glass.drawBalloon(canvas, popupRect, 14 * dp, k.rect, radius, bubbleTint, if (th.dark) 0.8f else 0.95f)
+        else glass.drawGlass(canvas, popupRect, 14 * dp, 0.2f, bubbleTint, if (th.dark) 0.8f else 0.95f)
         val rows = ceil(items.size / popupCols.toFloat()).toInt()
         for ((i, s) in items.withIndex()) {
             val col = i % popupCols
