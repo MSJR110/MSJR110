@@ -250,34 +250,7 @@ class GlassRenderer(private val ctx: Context) {
 
     private fun makeAurora(w: Int, h: Int): Bitmap {
         val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        val c = Canvas(bmp)
-        val p = Paint(Paint.ANTI_ALIAS_FLAG or Paint.DITHER_FLAG)
-        p.shader = LinearGradient(0f, 0f, 0f, h.toFloat(), theme.base[0], theme.base[1], Shader.TileMode.CLAMP)
-        c.drawRect(0f, 0f, w.toFloat(), h.toFloat(), p)
-        // layout of light blobs: (x, y, radius as fraction of width, color index, alpha)
-        val spots = arrayOf(
-            floatArrayOf(0.12f, 0.20f, 0.54f, 0f, 0.60f),
-            floatArrayOf(0.88f, 0.15f, 0.48f, 1f, 0.60f),
-            floatArrayOf(0.62f, 0.95f, 0.60f, 2f, 0.60f),
-            floatArrayOf(0.20f, 0.90f, 0.50f, 3f, 0.55f),
-            floatArrayOf(0.50f, 0.45f, 0.26f, 0f, 0.45f),
-            floatArrayOf(0.78f, 0.60f, 0.24f, 1f, 0.45f),
-            floatArrayOf(0.32f, 0.55f, 0.22f, 2f, 0.40f),
-        )
-        val boost = 0.55f + 0.45f * strength
-        for (s in spots) {
-            val col = theme.blobs[s[3].toInt() % theme.blobs.size]
-            val a = (s[4] * boost * 255).toInt().coerceIn(0, 255)
-            val cx = s[0] * w; val cy = s[1] * h; val rad = s[2] * w * 1.2f
-            p.shader = RadialGradient(cx, cy, rad,
-                intArrayOf(Color.argb(a, Color.red(col), Color.green(col), Color.blue(col)),
-                    Color.argb(0, Color.red(col), Color.green(col), Color.blue(col))),
-                null, Shader.TileMode.CLAMP)
-            c.drawRect(0f, 0f, w.toFloat(), h.toFloat(), p)
-        }
-        p.shader = null
-        p.color = theme.veil
-        c.drawRect(0f, 0f, w.toFloat(), h.toFloat(), p)
+        ThemeArt.paint(Canvas(bmp), theme, w, h, density, strength)
         return bmp
     }
 

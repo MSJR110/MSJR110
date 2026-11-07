@@ -80,10 +80,12 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
     }
 
     /**
-     * Asked when a tap lands right on the border between two letters: return true to type [alt]
-     * instead of [primary] (the IME checks which one actually continues a word).
+     * Asked for every letter tap with the letters the finger could have meant (the hit one first):
+     * returns how well each continues the word being typed, as log weights (only differences matter),
+     * or null for "no opinion" (not in a word, no dictionary…). Lets a tap near a border pick the letter
+     * that makes a word, the way phone keyboards decode fast two-thumb typing.
      */
-    var charResolver: ((primary: String, alt: String, closeness: Float) -> Boolean)? = null
+    var letterScorer: ((candidates: List<String>) -> FloatArray?)? = null
 
     private val dp = resources.displayMetrics.density
     private val sp = resources.displayMetrics.scaledDensity
@@ -420,9 +422,9 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
     }
 
     private fun tintFor(k: Key, th: Theme): Pair<Int, Float> {
-        val isEnterAccent = k.type == KeyType.ENTER && enterHasAction()
         return when {
-            isEnterAccent -> th.accent to 0.62f
+            // enter always wears the theme's colour; fully when it sends/searches/goes
+            k.type == KeyType.ENTER -> th.accent to (if (enterHasAction()) 0.62f else if (th.dark) 0.34f else 0.30f)
             k.type == KeyType.SHIFT && shiftState != 0 -> (if (th.dark) Color.WHITE else Color.WHITE) to (if (th.dark) 0.55f else 0.95f)
             k.isModifier && k.type != KeyType.ZWNJ && k.type != KeyType.EMOJI -> th.modTint.let { Color.rgb(Color.red(it), Color.green(it), Color.blue(it)) to Color.alpha(it) / 255f }
             else -> th.keyTint.let { Color.rgb(Color.red(it), Color.green(it), Color.blue(it)) to Color.alpha(it) / 255f }
@@ -548,7 +550,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         var bottom = k.rect.top + 1 * dp
         if (bottom - h < 2 * dp) bottom = 2 * dp + h
         tmpRect.set(cx - w / 2f, bottom - h, cx + w / 2f, bottom)
-        val bubbleTint = if (th.dark) Color.rgb(104, 106, 122) else Color.WHITE
+        val bubbleTint = th.balloon
         glass.drawBalloon(canvas, tmpRect, 14 * dp, k.rect, radius, bubbleTint, if (th.dark) 0.78f else 0.94f)
         labelPaint.typeface = typeface
         labelPaint.textSize = (if (text.length > 2) 22f else 32f) * sp
@@ -606,7 +608,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
     private fun drawPopup(canvas: Canvas, p: Ptr, th: Theme) {
         val items = popupItems(p)
         if (items.isEmpty()) return
-        val bubbleTint = if (th.dark) Color.rgb(104, 106, 122) else Color.WHITE
+        val bubbleTint = th.balloon
         canvas.save()
         val k = p.key
         if (k != null) glass.drawBalloon(canvas, popupRect, 14 * dp, k.rect, radius, bubbleTint, if (th.dark) 0.8f else 0.95f)
@@ -1023,6 +1025,8 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         /** the alternate came from holding the key (not a flick), so moving the finger keeps it */
         var flickByLong = false
         var downKey: Key? = null
+        /** the letter that was actually typed (the decoder may have picked a neighbour of [key]) */
+        var typedKey: Key? = null
         var committed = false
         var accX = 0f; var accY = 0f
         var repeat = 0
@@ -1065,7 +1069,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
                 velocity?.addMovement(e)
                 val p = pointers[e.getPointerId(idx)]
                 if (p != null) {
-                    move(p, e.getX(idx), e.getY(idx))
+                    move(p, e.getX(idx), e.getY(idx), lifting = true)
                     up(p)
                 }
                 if (e.actionMasked == MotionEvent.ACTION_UP) { velocity?.recycle(); velocity = null }
@@ -1090,9 +1094,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
 
     private fun keyAt(x: Float, y: Float): Key? {
         val l = layout ?: return null
-        val s = settings
-        var tx = x; var ty = y
-        if (s?.adaptiveTouch == true) { tx -= touchOffX; ty -= touchOffY }
+        val tx = correctedX(x, y); val ty = correctedY(x, y)
         for (k in l.allKeys) if (k.hit.contains(tx, ty)) return k
         // nearest key fallback (e.g. finger slightly outside)
         var best: Key? = null; var bd = Float.MAX_VALUE
@@ -1147,6 +1149,8 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         // feedback and the pressed look first: they're what the finger "feels", so nothing
         // (not even typing the previous finger's letter) may delay them
         listener?.onKeyFeedback(k, FEEDBACK_DOWN)
+        // deleting a letter the decoder just changed: type the next one exactly where it's tapped
+        if (k.type == KeyType.DELETE) { if (lastDecoded) noDecodeNext = true; lastDecoded = false }
         p.key = k
         p.downKey = k
         p.mode = PMode.KEY
@@ -1160,7 +1164,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         for (o in pointers.values) {
             if (o === p || o.mode != PMode.KEY || o.committed || popupPtr === o) continue
             when (o.key?.type) {
-                KeyType.CHAR -> commitChar(o)
+                KeyType.CHAR -> { commitChar(o); learnTouch(o) }
                 KeyType.SPACE -> if (!o.longFired) listener?.onSpace() else continue
                 else -> continue
             }
@@ -1186,7 +1190,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         kick()
     }
 
-    private fun move(p: Ptr, x: Float, y: Float) {
+    private fun move(p: Ptr, x: Float, y: Float, lifting: Boolean = false) {
         val dx = x - p.lastX; val dy = y - p.lastY
         p.lastX = x; p.lastY = y
         p.x = x; p.y = y
@@ -1212,7 +1216,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
                         // it's typed and you're back where you were, in one motion
                         val out = max(max(k.hit.left - x, x - k.hit.right) / k.rect.width(),
                             max(k.hit.top - y, y - k.hit.bottom) / k.rect.height())
-                        if (out > 0.3f) {
+                        if (out > 0.3f && !lifting) {
                             val target = keyAt(x, y)
                             if (target != null && target.type == KeyType.CHAR) {
                                 ui.removeCallbacks(p.longPress)
@@ -1243,7 +1247,9 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
                         } else if (p.flick && upDist < k.rect.height() * 0.4f) {
                             p.flick = false; invalidate()
                         }
-                        if (!p.flick) {
+                        // a thumb rolls as it lifts and the last reported point jumps: never change the
+                        // letter on the lift itself, nor during a quick tap — only a held, deliberate slide
+                        if (!p.flick && !lifting && System.currentTimeMillis() - p.downTime > 140) {
                             // slide to correct: only once the finger is clearly inside another key,
                             // so the small drift of a fast tap never changes the letter
                             val outX = max(0f, max(k.hit.left - x, x - k.hit.right))
@@ -1290,7 +1296,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
                         popupPtr = null
                     } else if (!p.committed) {
                         when (k.type) {
-                            KeyType.CHAR, KeyType.ZWNJ -> { commitChar(p); learnTouch(p, k) }
+                            KeyType.CHAR, KeyType.ZWNJ -> { commitChar(p); learnTouch(p) }
                             KeyType.SPACE -> if (!p.longFired) listener?.onSpace()
                             KeyType.ENTER -> listener?.onEnter()
                             KeyType.SYMBOLS, KeyType.SYMBOLS2, KeyType.LETTERS -> listener?.onSwitchPage(k.type)
@@ -1343,34 +1349,59 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
             p.key = k
         }
         var text = if (p.flick && k.hint != null) k.hint else k.output
-        if (!p.flick && k === p.downKey && k.type == KeyType.CHAR && k.output.length == 1 && k.output[0].isLetter()) {
-            val alt = borderNeighbour(k, p.downX, p.downY)
-            if (alt != null && charResolver?.invoke(text, alt.first.output, alt.second) == true) text = alt.first.output
+        p.typedKey = k
+        var decoded = false
+        if (!p.flick && k === p.downKey && isLetterKey(k) && !noDecodeNext) {
+            val d = decode(k, p.downX, p.downY)
+            if (d !== k) { text = d.output; p.typedKey = d; decoded = true }
         }
+        noDecodeNext = false
+        lastDecoded = decoded
         listener?.onChar(text, p.flick)
     }
 
+    private fun isLetterKey(k: Key) = k.type == KeyType.CHAR && k.output.length == 1 && k.output[0].isLetter()
+
+    /** the letter the decoder last picked over the one hit (deleting it turns decoding off for one tap) */
+    private var lastDecoded = false
+    private var noDecodeNext = false
+
     /**
-     * The letter next to [k] if the tap landed close to the border between them, else null.
-     * The second value is how far the tap was from being a dead-even split (0 = right on the border,
-     * in key sizes).
+     * Which letter a tap most likely meant: a soft "where did the thumb land" model (a bell curve around
+     * each key, shifted by what's been learned about this person's thumbs) times "which letter makes a
+     * word" from the IME. The hit key gets a head start and an unknown word never outweighs a tap
+     * well inside a key, so deliberate spellings still come out exactly as tapped.
      */
-    private fun borderNeighbour(k: Key, x: Float, y: Float): Pair<Key, Float>? {
-        val l = layout ?: return null
-        var tx = x; var ty = y
-        if (settings?.adaptiveTouch == true) { tx -= touchOffX; ty -= touchOffY }
-        val kw = k.hit.width(); val kh = k.hit.height()
-        if (kw <= 0f || kh <= 0f) return null
-        fun dist(o: Key) = hypot((tx - o.hit.centerX()) / kw, (ty - o.hit.centerY()) / kh)
-        val dk = dist(k)
-        var best: Key? = null; var bd = Float.MAX_VALUE
+    private fun decode(hit: Key, x: Float, y: Float): Key {
+        val l = layout ?: return hit
+        val scorer = letterScorer ?: return hit
+        val kw = hit.rect.width() + gapX
+        val kh = hit.rect.height() + gapY
+        if (kw <= 0f || kh <= 0f) return hit
+        val tx = correctedX(x, y); val ty = correctedY(x, y)
+        val cands = ArrayList<Key>(6)
+        val spatial = ArrayList<Float>(6)
         for (o in l.allKeys) {
-            if (o === k || o.type != KeyType.CHAR || o.output.length != 1 || !o.output[0].isLetter()) continue
-            val d = dist(o)
-            if (d < bd) { bd = d; best = o }
+            if (o !== hit && !isLetterKey(o)) continue
+            val dx = (tx - o.rect.centerX()) / kw
+            val dy = (ty - o.rect.centerY()) / kh
+            if (o !== hit && dx * dx + dy * dy > 1.25f * 1.25f) continue
+            val s = -0.5f * (dx * dx / (SIGMA_X * SIGMA_X) + dy * dy / (SIGMA_Y * SIGMA_Y))
+            if (o === hit) { cands.add(0, o); spatial.add(0, s + HIT_BONUS) } else { cands += o; spatial += s }
         }
-        // within about a fifth of a key of the border
-        return if (best != null && bd - dk < 0.22f) best to (bd - dk) else null
+        if (cands.size < 2) return hit
+        val lm = scorer(cands.map { it.output }) ?: return hit
+        if (lm.size != cands.size) return hit
+        var top = Float.NEGATIVE_INFINITY
+        for (v in lm) { if (v.isNaN()) return hit; if (v > top) top = v }
+        if (top == Float.NEGATIVE_INFINITY) return hit // nothing known starts like this: type what was hit
+        var best = 0; var bestScore = Float.NEGATIVE_INFINITY
+        for (i in cands.indices) {
+            val rel = max(lm[i] - top, -LM_FLOOR)
+            val score = spatial[i] + LM_WEIGHT * rel
+            if (score > bestScore) { bestScore = score; best = i }
+        }
+        return cands[best]
     }
 
     private fun onLongPress(p: Ptr) {
@@ -1474,22 +1505,81 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
 
     // --- adaptive touch: learn where this person's thumb actually lands
 
-    private var touchOffX = 0f
-    private var touchOffY = 0f
-    var onTouchModelChanged: ((Float, Float) -> Unit)? = null
+    // Two thumbs miss in different ways: the left one lands off to one side, the right one to the other,
+    // and both drift differently on the top and bottom rows. So the keyboard is split into a grid of
+    // zones (4 bands × 3 columns) and each zone learns its own offset, in key sizes so it survives
+    // height changes. Taps are shifted back by their zone's offset before anything looks at them.
+
+    private val zoneX = FloatArray(ZONE_ROWS * ZONE_COLS)
+    private val zoneY = FloatArray(ZONE_ROWS * ZONE_COLS)
+    private val zoneN = IntArray(ZONE_ROWS * ZONE_COLS)
+    var onTouchModelChanged: ((String) -> Unit)? = null
     private var touchSamples = 0
 
-    fun setTouchModel(x: Float, y: Float) { touchOffX = x; touchOffY = y }
+    /** Restore a model saved by [onTouchModelChanged]. */
+    fun setTouchModel(saved: String?) {
+        zoneX.fill(0f); zoneY.fill(0f); zoneN.fill(0)
+        val parts = saved?.split(',') ?: return
+        if (parts.size != ZONE_ROWS * ZONE_COLS * 3) return
+        for (i in 0 until ZONE_ROWS * ZONE_COLS) {
+            zoneX[i] = parts[i * 3].toFloatOrNull()?.coerceIn(-ZONE_CAP_X, ZONE_CAP_X) ?: 0f
+            zoneY[i] = parts[i * 3 + 1].toFloatOrNull()?.coerceIn(-ZONE_CAP_Y, ZONE_CAP_Y) ?: 0f
+            zoneN[i] = parts[i * 3 + 2].toIntOrNull() ?: 0
+        }
+    }
 
-    private fun learnTouch(p: Ptr, k: Key) {
-        if (settings?.adaptiveTouch != true || p.flick || k.type != KeyType.CHAR) return
-        if (hypot(p.x - p.downX, p.y - p.downY) > 8 * dp) return
-        val ox = (p.downX - k.rect.centerX()).coerceIn(-k.rect.width() / 2, k.rect.width() / 2)
-        val oy = (p.downY - k.rect.centerY()).coerceIn(-k.rect.height() / 2, k.rect.height() / 2)
-        // slow exponential average, capped so the layout never feels "off"
-        touchOffX = (touchOffX * 0.985f + ox * 0.015f * 0.5f).coerceIn(-4 * dp, 4 * dp)
-        touchOffY = (touchOffY * 0.985f + oy * 0.015f * 0.5f).coerceIn(-6 * dp, 6 * dp)
-        if (++touchSamples % 50 == 0) onTouchModelChanged?.invoke(touchOffX, touchOffY)
+    private fun zoneOf(x: Float, y: Float): Int {
+        if (keysArea.isEmpty) return 0
+        val c = ((x - keysArea.left) / keysArea.width() * ZONE_COLS).toInt().coerceIn(0, ZONE_COLS - 1)
+        val r = ((y - keysArea.top) / keysArea.height() * ZONE_ROWS).toInt().coerceIn(0, ZONE_ROWS - 1)
+        return r * ZONE_COLS + c
+    }
+
+    private fun keyUnitW(): Float = (keysArea.width() - 6 * dp) / (layout?.units ?: 10f)
+
+    /** The learned offset at a point, blended smoothly between zone centres so no key edge jumps. */
+    private fun zoneOffset(arr: FloatArray, x: Float, y: Float): Float {
+        if (keysArea.isEmpty) return 0f
+        val fc = ((x - keysArea.left) / keysArea.width() * ZONE_COLS - 0.5f).coerceIn(0f, ZONE_COLS - 1f)
+        val fr = ((y - keysArea.top) / keysArea.height() * ZONE_ROWS - 0.5f).coerceIn(0f, ZONE_ROWS - 1f)
+        val c0 = fc.toInt().coerceAtMost(ZONE_COLS - 2); val r0 = fr.toInt().coerceAtMost(ZONE_ROWS - 2)
+        val tc = fc - c0; val tr = fr - r0
+        val a = arr[r0 * ZONE_COLS + c0] * (1 - tc) + arr[r0 * ZONE_COLS + c0 + 1] * tc
+        val b = arr[(r0 + 1) * ZONE_COLS + c0] * (1 - tc) + arr[(r0 + 1) * ZONE_COLS + c0 + 1] * tc
+        return a * (1 - tr) + b * tr
+    }
+
+    private fun correctedX(x: Float, y: Float): Float =
+        if (settings?.adaptiveTouch == true) x - zoneOffset(zoneX, x, y) * keyUnitW() else x
+
+    private fun correctedY(x: Float, y: Float): Float =
+        if (settings?.adaptiveTouch == true) y - zoneOffset(zoneY, x, y) * rowPitch else y
+
+    private fun learnTouch(p: Ptr) {
+        val k = p.typedKey ?: return
+        if (settings?.adaptiveTouch != true || p.flick || !isLetterKey(k)) return
+        if (layout?.id == "num") return
+        // only clean taps: a finger that slid around says nothing about where it aims
+        if (hypot(p.x - p.downX, p.y - p.downY) > 10 * dp) return
+        val ox = ((p.downX - k.rect.centerX()) / keyUnitW()).coerceIn(-0.5f, 0.5f)
+        val oy = ((p.downY - k.rect.centerY()) / rowPitch).coerceIn(-0.5f, 0.5f)
+        val z = zoneOf(p.downX, p.downY)
+        // learn quickly at first, then settle into a slow average
+        val n = ++zoneN[z]
+        val rate = max(0.025f, 1f / (n + 8))
+        zoneX[z] = (zoneX[z] + (ox - zoneX[z]) * rate).coerceIn(-ZONE_CAP_X, ZONE_CAP_X)
+        zoneY[z] = (zoneY[z] + (oy - zoneY[z]) * rate).coerceIn(-ZONE_CAP_Y, ZONE_CAP_Y)
+        if (zoneN[z] > 100000) zoneN[z] = 100000
+        if (++touchSamples % 40 == 0) onTouchModelChanged?.invoke(touchModelString())
+    }
+
+    private fun touchModelString(): String {
+        val sb = StringBuilder()
+        for (i in 0 until ZONE_ROWS * ZONE_COLS) {
+            if (i > 0) sb.append(',')
+            sb.append(String.format(java.util.Locale.US, "%.4f,%.4f,%d", zoneX[i], zoneY[i], zoneN[i]))
+        }
+        return sb.toString()
     }
 
     // --- strip
@@ -1605,5 +1695,20 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         const val FEEDBACK_TICK = 1
         const val FEEDBACK_LIGHT = 2
         const val FEEDBACK_HEAVY = 3
+
+        // touch model: thumb scatter around a key's centre, in key sizes
+        private const val SIGMA_X = 0.40f
+        private const val SIGMA_Y = 0.38f
+        /** head start for the key that was actually hit (in log units) */
+        private const val HIT_BONUS = 0.35f
+        /** how much "this makes a word" counts against where the finger landed */
+        private const val LM_WEIGHT = 0.65f
+        /** a letter that starts no known word is only this much (log units) worse than the best */
+        private const val LM_FLOOR = 3.5f
+
+        private const val ZONE_ROWS = 4
+        private const val ZONE_COLS = 3
+        private const val ZONE_CAP_X = 0.3f
+        private const val ZONE_CAP_Y = 0.3f
     }
 }

@@ -43,6 +43,7 @@ import dev.msjr.prism.data.Prefs
 import dev.msjr.prism.text.UserDictionary
 import dev.msjr.prism.ui.GlassRenderer
 import dev.msjr.prism.ui.Theme
+import dev.msjr.prism.ui.ThemeArt
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
@@ -203,7 +204,8 @@ class SettingsActivity : Activity() {
                 toast("پاک شد")
             })
             c.addView(button("ریست لمس هوشمند") {
-                prefs.edit().putFloat(Prefs.TOUCH_OFFSET_X, 0f).putFloat(Prefs.TOUCH_OFFSET_Y, 0f).apply()
+                prefs.edit().putFloat(Prefs.TOUCH_OFFSET_X, 0f).putFloat(Prefs.TOUCH_OFFSET_Y, 0f)
+                    .remove(Prefs.TOUCH_ZONES).putLong(Prefs.TOUCH_RESET, System.currentTimeMillis()).apply()
                 toast("ریست شد")
             })
         }
@@ -417,7 +419,7 @@ class SettingsActivity : Activity() {
                 setPadding((6 * dp).toInt(), (6 * dp).toInt(), (6 * dp).toInt(), (6 * dp).toInt())
             }
             val sw = View(this).apply {
-                background = if (th == null) AuroraDrawable(Theme.ALL[0], split = Theme.ALL[1]) else AuroraDrawable(th)
+                background = if (th == null) ThemeArt.Swatch(Theme.ALL[0], split = Theme.ALL[1], density = dp) else ThemeArt.Swatch(th, density = dp)
                 clipToOutline = true
                 outlineProvider = android.view.ViewOutlineProvider.BACKGROUND
             }
@@ -431,7 +433,7 @@ class SettingsActivity : Activity() {
                 }
                 addView(sw, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
             }
-            col.addView(swHolder, LinearLayout.LayoutParams((64 * dp).toInt(), (64 * dp).toInt()))
+            col.addView(swHolder, LinearLayout.LayoutParams((92 * dp).toInt(), (74 * dp).toInt()))
             col.addView(text(th?.nameFa ?: "خودکار", 12f).apply { gravity = Gravity.CENTER; setPadding(0, (4 * dp).toInt(), 0, 0) })
             col.setOnClickListener { prefs.edit().putString(Prefs.THEME, id).apply(); mark(id) }
             row.addView(col)

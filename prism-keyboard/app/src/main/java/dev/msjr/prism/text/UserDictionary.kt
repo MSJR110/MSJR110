@@ -76,15 +76,19 @@ class UserDictionary(private val dir: File, private val lang: String) {
 
     /** Have you typed any word starting with [prefix]? (Cached per prefix so taps stay fast.) */
     @Synchronized
-    fun hasPrefix(prefix: String): Boolean {
+    fun hasPrefix(prefix: String): Boolean = prefixUse(prefix) > 0
+
+    /** How many times you've typed words starting with [prefix] (cached per prefix so taps stay fast). */
+    @Synchronized
+    fun prefixUse(prefix: String): Int {
         prefixCache[prefix]?.let { return it }
-        var found = false
-        for (k in words.keys) if (k.startsWith(prefix)) { found = true; break }
-        if (prefixCache.size > 512) prefixCache.clear()
-        prefixCache[prefix] = found
-        return found
+        var n = 0
+        for ((k, c) in words) if (k.startsWith(prefix)) n += c
+        if (prefixCache.size > 1024) prefixCache.clear()
+        prefixCache[prefix] = n
+        return n
     }
-    private val prefixCache = HashMap<String, Boolean>()
+    private val prefixCache = HashMap<String, Int>()
     @Synchronized fun displayOf(key: String): String = display[key] ?: key
     @Synchronized fun bigram(prev: String, key: String): Int = bigrams[prev]?.get(key) ?: 0
 

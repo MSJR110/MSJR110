@@ -157,12 +157,10 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
         }
         val v = KeyboardView(this, glass)
         v.listener = this
-        v.charResolver = { primary, alt, closeness -> preferNeighbour(primary, alt, closeness) }
+        v.letterScorer = { cands -> scoreLetters(cands) }
         v.clipboardStore = clipStore
-        v.setTouchModel(Prefs.get(this).getFloat(Prefs.TOUCH_OFFSET_X, 0f), Prefs.get(this).getFloat(Prefs.TOUCH_OFFSET_Y, 0f))
-        v.onTouchModelChanged = { x, y ->
-            Prefs.get(this).edit().putFloat(Prefs.TOUCH_OFFSET_X, x).putFloat(Prefs.TOUCH_OFFSET_Y, y).apply()
-        }
+        v.setTouchModel(Prefs.get(this).getString(Prefs.TOUCH_ZONES, null))
+        v.onTouchModelChanged = { model -> Prefs.get(this).edit().putString(Prefs.TOUCH_ZONES, model).apply() }
         view = v
         applyLook()
         return v
@@ -262,7 +260,8 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
     }
 
     override fun onSharedPreferenceChanged(p: SharedPreferences?, key: String?) {
-        if (key == Prefs.TOUCH_OFFSET_X || key == Prefs.TOUCH_OFFSET_Y || key == Prefs.RECENT_EMOJI) return
+        if (key == Prefs.TOUCH_OFFSET_X || key == Prefs.TOUCH_OFFSET_Y || key == Prefs.TOUCH_ZONES || key == Prefs.RECENT_EMOJI) return
+        if (key == Prefs.TOUCH_RESET) { view?.setTouchModel(null); return }
         if (key == Prefs.USER_DICT_RESET) { engine.clearUser(); rejected.clear(); return }
         if (key == Prefs.CLIPBOARD_RESET) {
             clipStore.clearAllItems()
@@ -547,18 +546,18 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
     }
 
     /**
-     * A tap right on the border of two letters: keep what was hit unless it can't continue any
-     * word while the neighbour clearly can ("سلا" + border of م/ن → "سلام").
+     * For the letters a tap could have meant: how well each continues the word being typed
+     * ("سلا" + م → "سلام" beats "سلا" + ن), as log weights. Null = no opinion, type what was hit.
      */
-    private fun preferNeighbour(primary: String, alt: String, closeness: Float): Boolean {
-        if (!allowSuggestions || page != Page.LETTERS || midWord || word.isEmpty()) return false
+    private fun scoreLetters(cands: List<String>): FloatArray? {
+        if (!allowSuggestions || page != Page.LETTERS || midWord || cands.isEmpty()) return null
         val w = word.toString()
-        val l = wordLang(w + primary)
-        val ps = engine.prefixStrength(w + primary, l)
-        if (ps == 0) return engine.prefixStrength(w + alt, l) >= 40
-        // practically on the border: what was hit only starts rare words, the neighbour common ones
-        if (closeness < 0.08f && ps < 12) return engine.prefixStrength(w + alt, l) >= 150
-        return false
+        if (w.length > 24) return null
+        val l = wordLang(w + cands[0])
+        val out = FloatArray(cands.size) { engine.prefixLogWeight(w + cands[it], prevWord, l) }
+        // the first letter of a word says less about what's coming: let the finger count for more
+        if (w.isEmpty()) for (i in out.indices) out[i] *= 0.6f
+        return out
     }
 
     private fun applyLateCorrection(w: String, r: SuggestionResult) {

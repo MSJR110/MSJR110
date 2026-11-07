@@ -41,6 +41,10 @@ object Prefs {
     const val RECENT_EMOJI = "recent_emoji"
     const val TOUCH_OFFSET_X = "touch_off_x"
     const val TOUCH_OFFSET_Y = "touch_off_y"
+    /** per-zone learned thumb offsets (see KeyboardView.setTouchModel) */
+    const val TOUCH_ZONES = "touch_zones"
+    /** signal from the settings screen: forget the learned thumb offsets */
+    const val TOUCH_RESET = "touch_reset"
     const val SWIPE_DELETE = "swipe_delete"
     const val GLOW = "glow"
     /** Signals from the settings screen to the running keyboard (value = time of the request). */

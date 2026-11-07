@@ -7,6 +7,7 @@ import android.os.Looper
 import android.graphics.PointF
 import dev.msjr.prism.keyboard.FieldKind
 import dev.msjr.prism.keyboard.Layouts
+import kotlin.math.exp
 import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.min
@@ -60,6 +61,9 @@ class SuggestionEngine(private val ctx: Context) {
 
     /** How strongly [prefix] starts a real word (0 = no known word starts like this). Fast; main-thread safe. */
     fun prefixStrength(prefix: String, lang: String): Int = core.prefixStrength(prefix, lang)
+
+    /** See [SuggestionCore.prefixLogWeight]. Fast; main-thread safe. */
+    fun prefixLogWeight(prefix: String, prev: String?, lang: String): Float = core.prefixLogWeight(prefix, prev, lang)
 
     fun learn(lang: String, word: String, prev: String?) {
         worker.post { user(lang).learn(word, prev) }
@@ -120,6 +124,35 @@ class SuggestionCore(val userFa: UserDictionary, val userEn: UserDictionary) {
             i++; n++
         }
         return best
+    }
+
+    /**
+     * How likely a word starts with [prefix], as a log weight (natural log; only differences matter).
+     * Sums every dictionary word with that start (a frequency of ~28 is one "e"-fold), plus what you've
+     * typed yourself and, if given, the words you usually type after [prevRaw].
+     * NaN = no opinion (dictionary not loaded yet); -Infinity = nothing known starts like this.
+     */
+    fun prefixLogWeight(prefix: String, prevRaw: String?, lang: String): Float {
+        val q = key(prefix, lang)
+        val dict = (if (lang == "fa") dictFa else dictEn) ?: return Float.NaN
+        var sum = 0.0
+        var i = dict.lowerBound(q)
+        var n = 0
+        while (i < dict.size && n < 3000) {
+            if (!dict.keys[i].startsWith(q)) break
+            sum += exp(dict.freqs[i] / 28.0)
+            i++; n++
+        }
+        val user = user(lang)
+        val use = user.prefixUse(q)
+        // your own words count like very common ones
+        if (use > 0) sum += exp((185.0 + 28.0 * ln(1.0 + use)) / 28.0)
+        if (!prevRaw.isNullOrEmpty()) {
+            for ((w, c) in user.followers(key(prevRaw, lang), 12)) {
+                if (key(w, lang).startsWith(q)) sum += exp((215.0 + 28.0 * ln(1.0 + c)) / 28.0)
+            }
+        }
+        return if (sum <= 0.0) Float.NEGATIVE_INFINITY else ln(sum).toFloat()
     }
 
     // ------------------------------------------------------------------ core
