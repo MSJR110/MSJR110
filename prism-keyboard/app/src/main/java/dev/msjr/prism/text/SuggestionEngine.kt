@@ -137,7 +137,15 @@ class SuggestionCore(val userFa: UserDictionary, val userEn: UserDictionary) {
             if (f.isEmpty()) return SuggestionResult.EMPTY
             val slots = arrayOfNulls<Suggestion>(3)
             val order = intArrayOf(1, 0, 2)
-            f.forEachIndexed { i, (w, c) -> slots[order[i]] = Suggestion(w, Suggestion.Kind.PREDICTION, c.toFloat()) }
+            f.forEachIndexed { i, (w, c) ->
+                // a learned word typed without its half-space is shown spelled properly ("نمیشد" → "نمی‌شد")
+                var shown = w
+                if (dict != null && lang == "fa" && w.indexOf(TextTools.ZWNJ) < 0) {
+                    val di = dict.indexOf(key(w, lang))
+                    if (di >= 0 && dict.words[di].replace(TextTools.ZWNJ.toString(), "") == w) shown = dict.words[di]
+                }
+                slots[order[i]] = Suggestion(shown, Suggestion.Kind.PREDICTION, c.toFloat())
+            }
             return SuggestionResult("", slots, null, true)
         }
 

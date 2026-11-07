@@ -462,13 +462,13 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
             KeyType.EMOJI -> Icons.emoji(canvas, cx, cy, s, iconPaint)
             KeyType.ENTER -> when (enterAction) {
                 EditorInfo.IME_ACTION_SEARCH -> Icons.search(canvas, cx, cy, s, iconPaint)
-                EditorInfo.IME_ACTION_SEND -> Icons.send(canvas, cx, cy, s, iconPaint, l.rtl)
-                EditorInfo.IME_ACTION_GO, EditorInfo.IME_ACTION_NEXT -> Icons.send(canvas, cx, cy, s * 0.85f, iconPaint, l.rtl)
+                EditorInfo.IME_ACTION_SEND -> Icons.send(canvas, cx, cy, s, iconPaint, rtlIcons(l))
+                EditorInfo.IME_ACTION_GO, EditorInfo.IME_ACTION_NEXT -> Icons.send(canvas, cx, cy, s * 0.85f, iconPaint, rtlIcons(l))
                 EditorInfo.IME_ACTION_DONE -> {
                     canvas.drawLine(cx - s * 0.16f, cy, cx - s * 0.04f, cy + s * 0.12f, iconPaint)
                     canvas.drawLine(cx - s * 0.04f, cy + s * 0.12f, cx + s * 0.18f, cy - s * 0.12f, iconPaint)
                 }
-                else -> Icons.enter(canvas, cx, cy, s, iconPaint, l.rtl)
+                else -> Icons.enter(canvas, cx, cy, s, iconPaint, rtlIcons(l))
             }
             KeyType.SPACE -> {
                 labelPaint.typeface = typeface
@@ -515,6 +515,9 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
             }
         }
     }
+
+    /** Arrow icons point the Persian way on every Persian page, symbols included (those are laid out LTR). */
+    private fun rtlIcons(l: KeyboardLayout) = l.rtl || (langLabel == "FA" && l.id != "num")
 
     private fun displayLabel(k: Key): String {
         val shiftOn = shiftState != 0
@@ -1331,7 +1334,14 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
     }
 
     private fun commitChar(p: Ptr) {
-        val k = p.key ?: return
+        var k = p.key ?: return
+        // the layout may have been swapped under the finger (Persian shift switched itself off when the
+        // previous finger's letter was typed): type what's under the finger now, not the old layer
+        val l = layout
+        if (l != null && l.allKeys.none { it === k }) {
+            k = keyAt(p.x, p.y)?.takeIf { it.type == k.type } ?: k
+            p.key = k
+        }
         var text = if (p.flick && k.hint != null) k.hint else k.output
         if (!p.flick && k === p.downKey && k.type == KeyType.CHAR && k.output.length == 1 && k.output[0].isLetter()) {
             val alt = borderNeighbour(k, p.downX, p.downY)
