@@ -146,8 +146,8 @@ class SuggestionCore(val userFa: UserDictionary, val userEn: UserDictionary) {
         val user = user(lang)
         val use = user.prefixUse(q)
         // your own words count more the more you use them: typed once (maybe a typo) is like a
-        // so-so word, typed a dozen times like a very common one
-        if (use > 0) sum += exp((120.0 + 28.0 * ln(1.0 + use)) / 28.0)
+        // so-so word, typed ~30 times like the most common words
+        if (use > 0) sum += exp((95.0 + 28.0 * ln(1.0 + use)) / 28.0)
         if (!prevRaw.isNullOrEmpty()) {
             for ((w, c) in user.followers(key(prevRaw, lang), 12)) {
                 if (key(w, lang).startsWith(q)) sum += exp((215.0 + 28.0 * ln(1.0 + c)) / 28.0)
