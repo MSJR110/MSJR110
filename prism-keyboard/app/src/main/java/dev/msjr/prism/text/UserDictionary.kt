@@ -21,7 +21,7 @@ class UserDictionary(private val dir: File, private val lang: String) {
 
     @Synchronized
     fun load() {
-        words.clear(); display.clear(); bigrams.clear()
+        words.clear(); display.clear(); bigrams.clear(); prefixCache.clear()
         val f = file
         if (!f.exists()) return
         try {
@@ -68,6 +68,7 @@ class UserDictionary(private val dir: File, private val lang: String) {
         val k = norm(word)
         words.remove(k); display.remove(k)
         for (m in bigrams.values) m.remove(k)
+        prefixCache.clear()
         dirty++
     }
 
@@ -125,7 +126,7 @@ class UserDictionary(private val dir: File, private val lang: String) {
 
     @Synchronized
     fun clear() {
-        words.clear(); display.clear(); bigrams.clear(); dirty = 0
+        words.clear(); display.clear(); bigrams.clear(); prefixCache.clear(); dirty = 0
         file.delete()
     }
 

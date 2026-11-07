@@ -20,7 +20,7 @@ object Prefs {
     const val KEY_PREVIEW = "key_preview"
     const val LONG_PRESS_MS = "long_press_ms"
     const val HAPTIC = "haptic"                // 0..100 (0 = off)
-    const val SOUND = "sound"                  // "off" | "soft" | "glass" | "mech" | "system"
+    const val SOUND = "sound"                  // "off" | "iphone" | "click" | "soft" | "glass" | "mech" | "system"
     const val SOUND_VOLUME = "sound_volume"    // 0..100
     const val SOUND_RESPECT_SILENT = "sound_respect_silent"
     const val SUGGESTIONS = "suggestions"
@@ -43,12 +43,29 @@ object Prefs {
     const val TOUCH_OFFSET_Y = "touch_off_y"
     const val SWIPE_DELETE = "swipe_delete"
     const val GLOW = "glow"
+    /** Signals from the settings screen to the running keyboard (value = time of the request). */
+    const val USER_DICT_RESET = "user_dict_reset"
+    const val CLIPBOARD_RESET = "clipboard_reset"
 
     fun get(ctx: Context): SharedPreferences =
         ctx.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE)
 
+    /** Bumped when a default changes in a way existing installs should pick up once. */
+    private const val MIGRATION = "migration"
+
+    private fun migrate(p: SharedPreferences) {
+        val v = p.getInt(MIGRATION, 0)
+        if (v >= 1) return
+        val e = p.edit()
+        // v1: the new iPhone-style sound replaces the old default "click"
+        val s = p.getString(SOUND, null)
+        if (s == null || s == "click") e.putString(SOUND, "iphone")
+        e.putInt(MIGRATION, 1).apply()
+    }
+
     fun load(ctx: Context): Settings {
         val p = get(ctx)
+        migrate(p)
         return Settings(
             theme = p.getString(THEME, "auto") ?: "auto",
             bgMode = p.getString(BG_MODE, "aurora") ?: "aurora",
@@ -59,7 +76,7 @@ object Prefs {
             keyPreview = p.getBoolean(KEY_PREVIEW, true),
             longPressMs = p.getInt(LONG_PRESS_MS, 400),
             haptic = p.getInt(HAPTIC, 55),
-            sound = p.getString(SOUND, "click") ?: "click",
+            sound = p.getString(SOUND, "iphone") ?: "iphone",
             soundVolume = p.getInt(SOUND_VOLUME, 55),
             soundRespectSilent = p.getBoolean(SOUND_RESPECT_SILENT, true),
             suggestions = p.getBoolean(SUGGESTIONS, true),

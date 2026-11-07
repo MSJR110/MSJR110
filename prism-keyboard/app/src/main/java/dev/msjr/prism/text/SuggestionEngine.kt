@@ -67,6 +67,9 @@ class SuggestionEngine(private val ctx: Context) {
 
     fun forget(lang: String, word: String) { worker.post { user(lang).forget(word) } }
 
+    /** Forget everything learned (from the settings screen). */
+    fun clearUser() { worker.post { userFa.clear(); userEn.clear() } }
+
     fun save(force: Boolean) {
         worker.post { userFa.saveIfDirty(force); userEn.saveIfDirty(force) }
     }

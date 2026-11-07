@@ -42,6 +42,9 @@ class ClipboardStore(private val ctx: Context) {
 
     fun clearUnpinned() { items.removeAll { !it.pinned }; save() }
 
+    /** Drop everything, pinned too (the settings screen already deleted the file). */
+    fun clearAllItems() { items.clear(); lastAddedAt = 0L; save() }
+
     private fun load() {
         try {
             val f = file

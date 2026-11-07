@@ -64,6 +64,7 @@ class SettingsActivity : Activity() {
         super.onCreate(savedInstanceState)
         font = try { Typeface.createFromAsset(assets, "fonts/Vazirmatn-Regular.ttf") } catch (_: Throwable) { Typeface.DEFAULT }
         fontBold = try { Typeface.createFromAsset(assets, "fonts/Vazirmatn-Bold.ttf") } catch (_: Throwable) { Typeface.DEFAULT_BOLD }
+        Prefs.load(this) // applies one-time default migrations before the controls read them
         build()
     }
 
@@ -155,7 +156,7 @@ class SettingsActivity : Activity() {
         card("حس و صدا") { c ->
             c.addView(slider("قدرت لرزش", Prefs.HAPTIC, 55, 0, 100, zeroLabel = "خاموش"))
             c.addView(label("صدای کلیدها"))
-            c.addView(chips(Prefs.SOUND, listOf("off" to "خاموش", "click" to "کلیک", "soft" to "نرم", "glass" to "شیشه‌ای", "mech" to "مکانیکی", "system" to "سیستم"), "click"))
+            c.addView(chips(Prefs.SOUND, listOf("iphone" to "آیفونی", "click" to "کلیک", "soft" to "نرم", "glass" to "شیشه‌ای", "mech" to "مکانیکی", "system" to "سیستم", "off" to "خاموش"), "iphone"))
             c.addView(slider("بلندی صدا", Prefs.SOUND_VOLUME, 55, 0, 100))
             c.addView(toggle("بی‌صدا با حالت سکوت گوشی", "وقتی گوشی روی سایلنت یا ویبره‌ست صدا نده", Prefs.SOUND_RESPECT_SILENT, true))
             c.addView(slider("مکث نگه‌داشتن کلید", Prefs.LONG_PRESS_MS, 400, 180, 650, suffix = " ms"))
@@ -179,6 +180,8 @@ class SettingsActivity : Activity() {
             c.addView(toggle("تاریخچه‌ی کلیپ‌بورد", "متن‌های کپی‌شده توی کیبورد در دسترس باشن", Prefs.CLIPBOARD, true))
             c.addView(button("پاک کردن تاریخچه") {
                 ClipboardStore.clearAll(this)
+                // tell the running keyboard too, or it would write its copy back
+                prefs.edit().putLong(Prefs.CLIPBOARD_RESET, System.currentTimeMillis()).apply()
                 toast("پاک شد")
             })
         }
@@ -195,7 +198,9 @@ class SettingsActivity : Activity() {
             c.addView(text("Prism هیچ دسترسی‌ای به اینترنت نداره. هرچی می‌نویسی و یاد می‌گیره فقط روی گوشی خودت می‌مونه.", 13f, color = fgDim))
             c.addView(button("فراموش کردن کلمات یادگرفته‌شده") {
                 UserDictionary.clearAll(this)
-                toast("پاک شد — کیبورد رو یه بار ببند و باز کن")
+                // tell the running keyboard too, or it would write its copy back
+                prefs.edit().putLong(Prefs.USER_DICT_RESET, System.currentTimeMillis()).apply()
+                toast("پاک شد")
             })
             c.addView(button("ریست لمس هوشمند") {
                 prefs.edit().putFloat(Prefs.TOUCH_OFFSET_X, 0f).putFloat(Prefs.TOUCH_OFFSET_Y, 0f).apply()

@@ -68,6 +68,9 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
     private val word = StringBuilder()
     private var prevWord: String? = null
     private var cursor = -1
+    /** Last selection the app reported (-1 = unknown). */
+    private var selStart = -1
+    private var selEnd = -1
     private val recentCursors = IntArray(24) { -2 }
     private var recentIdx = 0
     private var midWord = false
@@ -154,7 +157,7 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
         }
         val v = KeyboardView(this, glass)
         v.listener = this
-        v.charResolver = { primary, alt -> preferNeighbour(primary, alt) }
+        v.charResolver = { primary, alt, closeness -> preferNeighbour(primary, alt, closeness) }
         v.clipboardStore = clipStore
         v.setTouchModel(Prefs.get(this).getFloat(Prefs.TOUCH_OFFSET_X, 0f), Prefs.get(this).getFloat(Prefs.TOUCH_OFFSET_Y, 0f))
         v.onTouchModelChanged = { x, y ->
@@ -225,6 +228,7 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
         shift = 0
         word.setLength(0); prevWord = null
         cursor = editorInfo.initialSelStart
+        selStart = editorInfo.initialSelStart; selEnd = editorInfo.initialSelEnd
         recentCursors.fill(-2)
         lastAutoSpace = false; pendingPrefixZwnj = false; undoCorrection = null
         suggestions = SuggestionResult.EMPTY
@@ -241,21 +245,31 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
         resync()
         updateShift()
         updateSuggestions()
+        sound.warmUp()
     }
 
     override fun onFinishInputView(finishingInput: Boolean) {
         super.onFinishInputView(finishingInput)
         engine.save(true)
+        sound.sleep()
         view?.resetState()
     }
 
     override fun onWindowHidden() {
         super.onWindowHidden()
         engine.save(true)
+        sound.sleep()
     }
 
     override fun onSharedPreferenceChanged(p: SharedPreferences?, key: String?) {
         if (key == Prefs.TOUCH_OFFSET_X || key == Prefs.TOUCH_OFFSET_Y || key == Prefs.RECENT_EMOJI) return
+        if (key == Prefs.USER_DICT_RESET) { engine.clearUser(); rejected.clear(); return }
+        if (key == Prefs.CLIPBOARD_RESET) {
+            clipStore.clearAllItems()
+            view?.refreshPanel()
+            refreshClipChip()
+            return
+        }
         val oldFont = settings.font
         settings = Prefs.load(this)
         if (key == Prefs.LANG) lang = settings.lang
@@ -305,6 +319,7 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
 
     override fun onUpdateSelection(oldSelStart: Int, oldSelEnd: Int, newSelStart: Int, newSelEnd: Int, candidatesStart: Int, candidatesEnd: Int) {
         super.onUpdateSelection(oldSelStart, oldSelEnd, newSelStart, newSelEnd, candidatesStart, candidatesEnd)
+        selStart = newSelStart; selEnd = newSelEnd
         if (swipeBase >= 0) return
         if (newSelStart == newSelEnd && (newSelStart == cursor || recentCursors.contains(newSelStart))) return
         // the cursor moved for a reason we didn't cause (tap, app edit, trackpad…)
@@ -510,11 +525,11 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
                 }
             }
             // smart half-space for suffixes: "کتاب ها" → "کتاب‌ها"
-            if (settings.smartZwnj && finalWord.isNotEmpty() && TextTools.isPersianText(finalWord)) {
+            // (the cheap word check comes first: reading text back from the app is a blocking call)
+            if (settings.smartZwnj && finalWord.isNotEmpty() && TextTools.shouldJoinSuffix(prevWord ?: "", finalWord)) {
                 val before = c.getTextBeforeCursor(finalWord.length + 2, 0)?.toString()
                 if (before != null && before.length == finalWord.length + 2 && before.endsWith(finalWord) &&
-                    before[0].let { TextTools.isPersianLetter(it) } && before[1] == ' ' &&
-                    TextTools.shouldJoinSuffix(prevWord ?: "", finalWord)
+                    before[0].let { TextTools.isPersianLetter(it) } && before[1] == ' '
                 ) {
                     deleteBefore(finalWord.length + 1)
                     commit(TextTools.ZWNJ + finalWord)
@@ -535,12 +550,15 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
      * A tap right on the border of two letters: keep what was hit unless it can't continue any
      * word while the neighbour clearly can ("سلا" + border of م/ن → "سلام").
      */
-    private fun preferNeighbour(primary: String, alt: String): Boolean {
+    private fun preferNeighbour(primary: String, alt: String, closeness: Float): Boolean {
         if (!allowSuggestions || page != Page.LETTERS || midWord || word.isEmpty()) return false
         val w = word.toString()
         val l = wordLang(w + primary)
-        if (engine.prefixStrength(w + primary, l) > 0) return false
-        return engine.prefixStrength(w + alt, l) >= 40
+        val ps = engine.prefixStrength(w + primary, l)
+        if (ps == 0) return engine.prefixStrength(w + alt, l) >= 40
+        // practically on the border: what was hit only starts rare words, the neighbour common ones
+        if (closeness < 0.08f && ps < 12) return engine.prefixStrength(w + alt, l) >= 150
+        return false
     }
 
     private fun applyLateCorrection(w: String, r: SuggestionResult) {
@@ -590,9 +608,12 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
             val before = c.getTextBeforeCursor(corr.length + 1, 0)?.toString()
             if (before == "$corr ") {
                 c.beginBatchEdit()
-                deleteBefore(corr.length + 1)
-                commit(orig)
-                c.endBatchEdit()
+                try {
+                    deleteBefore(corr.length + 1)
+                    commit(orig)
+                } finally {
+                    c.endBatchEdit()
+                }
                 rejected += orig.lowercase()
                 // you meant it: remember the word so it's never "corrected" again
                 if (!privateField && settings.learn) engine.learn(wordLang(orig), orig, null)
@@ -601,12 +622,15 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
                 return
             }
         }
-        val selected = c.getSelectedText(0)
-        if (!selected.isNullOrEmpty()) {
-            c.commitText("", 1)
-            cursor = -1
-            resync(); updateShift(); updateSuggestions()
-            return
+        // asking the app for the selection is a blocking call: only do it when there may be one
+        if (selStart < 0 || selStart != selEnd) {
+            val selected = c.getSelectedText(0)
+            if (!selected.isNullOrEmpty()) {
+                c.commitText("", 1)
+                cursor = -1
+                resync(); updateShift(); updateSuggestions()
+                return
+            }
         }
         if (repeat >= 14) {
             // word-at-a-time when holding delete
@@ -619,7 +643,8 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
             if (n > 0) deleteBefore(n) else sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL)
             resync()
         } else {
-            val before = c.getTextBeforeCursor(12, 0)?.toString()
+            // long enough for the longest emoji (family / couple sequences with skin tones)
+            val before = c.getTextBeforeCursor(48, 0)?.toString()
             if (before.isNullOrEmpty()) {
                 sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL)
                 cursor = -1
@@ -726,7 +751,8 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
         repeat(kotlin.math.abs(stepsY)) {
             sendDownUpKeyEvents(if (stepsY > 0) KeyEvent.KEYCODE_DPAD_DOWN else KeyEvent.KEYCODE_DPAD_UP)
         }
-        if (c.getSelectedText(0).isNullOrEmpty()) haptics.tick()
+        // a light tick per step while moving the cursor (not while extending a selection)
+        if (selStart == selEnd) haptics.tick()
     }
 
     override fun onTrackpad(active: Boolean) {

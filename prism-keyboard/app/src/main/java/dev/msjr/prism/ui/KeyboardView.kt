@@ -71,11 +71,19 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
 
     var listener: Listener? = null
 
+    init {
+        // deliver finger movement as soon as it arrives instead of once per frame:
+        // slides, the space trackpad and swipe-delete follow the finger a frame sooner
+        if (Build.VERSION.SDK_INT >= 30) {
+            try { requestUnbufferedDispatch(android.view.InputDevice.SOURCE_CLASS_POINTER) } catch (_: Throwable) { }
+        }
+    }
+
     /**
      * Asked when a tap lands right on the border between two letters: return true to type [alt]
      * instead of [primary] (the IME checks which one actually continues a word).
      */
-    var charResolver: ((primary: String, alt: String) -> Boolean)? = null
+    var charResolver: ((primary: String, alt: String, closeness: Float) -> Boolean)? = null
 
     private val dp = resources.displayMetrics.density
     private val sp = resources.displayMetrics.scaledDensity
@@ -1117,6 +1125,17 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         }
 
         val k = keyAt(x, y) ?: return
+        // feedback and the pressed look first: they're what the finger "feels", so nothing
+        // (not even typing the previous finger's letter) may delay them
+        listener?.onKeyFeedback(k, FEEDBACK_DOWN)
+        p.key = k
+        p.downKey = k
+        p.mode = PMode.KEY
+        k.pressTarget = 1f
+        k.press = max(k.press, 0.85f); k.pressVel = 0f
+        if (k.type == KeyType.CHAR) { p.previewKey = k; previewScale = 1f }
+        invalidate()
+
         // rollover: a second finger lands while the first is still on a character or space —
         // type the first one now so fast typing keeps its order
         for (o in pointers.values) {
@@ -1127,20 +1146,12 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
                 else -> continue
             }
             o.committed = true
-            o.key?.pressTarget = 0f
+            // the same key pressed by both fingers stays down for the new one
+            if (o.key !== k) o.key?.pressTarget = 0f
             o.previewKey = null
             ui.removeCallbacks(o.longPress)
         }
-        p.key = k
-        p.downKey = k
-        p.mode = PMode.KEY
-        k.pressTarget = 1f
-        k.press = max(k.press, 0.85f); k.pressVel = 0f
-        if (k.type == KeyType.CHAR || k.type == KeyType.ZWNJ) p.previewKey = if (k.type == KeyType.CHAR) k else null
-        if (p.previewKey != null) previewScale = 1f
-        invalidate()
 
-        listener?.onKeyFeedback(k, FEEDBACK_DOWN)
         val lp = (settings?.longPressMs ?: 320).toLong()
         when (k.type) {
             KeyType.DELETE -> {
@@ -1233,7 +1244,8 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
             PMode.KEY -> {
                 val k = p.key
                 if (k != null) {
-                    k.pressTarget = 0f
+                    // another finger may still be holding the same key (fast double letters)
+                    if (pointers.values.none { it.key === k && it.mode == PMode.KEY }) k.pressTarget = 0f
                     if (popupPtr === p) {
                         val items = popupItems(p)
                         if (p.popupIndex in items.indices) listener?.onChar(items[p.popupIndex], true)
@@ -1272,13 +1284,17 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         var text = if (p.flick && k.hint != null) k.hint else k.output
         if (!p.flick && k === p.downKey && k.type == KeyType.CHAR && k.output.length == 1 && k.output[0].isLetter()) {
             val alt = borderNeighbour(k, p.downX, p.downY)
-            if (alt != null && charResolver?.invoke(text, alt.output) == true) text = alt.output
+            if (alt != null && charResolver?.invoke(text, alt.first.output, alt.second) == true) text = alt.first.output
         }
         listener?.onChar(text, p.flick)
     }
 
-    /** The letter next to [k] if the tap landed close to the border between them, else null. */
-    private fun borderNeighbour(k: Key, x: Float, y: Float): Key? {
+    /**
+     * The letter next to [k] if the tap landed close to the border between them, else null.
+     * The second value is how far the tap was from being a dead-even split (0 = right on the border,
+     * in key sizes).
+     */
+    private fun borderNeighbour(k: Key, x: Float, y: Float): Pair<Key, Float>? {
         val l = layout ?: return null
         var tx = x; var ty = y
         if (settings?.adaptiveTouch == true) { tx -= touchOffX; ty -= touchOffY }
@@ -1293,7 +1309,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
             if (d < bd) { bd = d; best = o }
         }
         // within about a fifth of a key of the border
-        return if (best != null && bd - dk < 0.22f) best else null
+        return if (best != null && bd - dk < 0.22f) best to (bd - dk) else null
     }
 
     private fun onLongPress(p: Ptr) {
