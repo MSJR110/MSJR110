@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Prism</string>
+    <string name="subtype_fa">فارسی</string>
+    <string name="subtype_en">English</string>
+</resources>

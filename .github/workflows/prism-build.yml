@@ -1,0 +1,86 @@
+name: Build Prism Keyboard
+
+on:
+  push:
+    paths:
+      - "prism-keyboard/**"
+      - ".github/workflows/prism-build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: prism-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: prism-keyboard
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # A stable signing key kept only in this repo's private Actions cache (never committed).
+      - name: Restore signing key
+        id: key
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.prism-signing
+          key: prism-signing-v1
+
+      - name: Create signing key (first build only)
+        if: steps.key.outputs.cache-hit != 'true'
+        working-directory: .
+        run: |
+          mkdir -p ~/.prism-signing
+          head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' > ~/.prism-signing/pass
+          keytool -genkeypair -keystore ~/.prism-signing/prism.jks -storepass "$(cat ~/.prism-signing/pass)" \
+            -keypass "$(cat ~/.prism-signing/pass)" -alias prism -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Prism Keyboard"
+
+      - name: Save signing key
+        if: steps.key.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.prism-signing
+          key: prism-signing-v1
+
+      - name: Build APK
+        run: |
+          chmod +x gradlew
+          export PRISM_KEYSTORE="$HOME/.prism-signing/prism.jks"
+          export PRISM_KEYSTORE_PASSWORD="$(cat $HOME/.prism-signing/pass)"
+          ./gradlew assembleRelease --stacktrace --no-daemon
+
+      - name: Collect APK
+        run: |
+          mkdir -p out
+          cp app/build/outputs/apk/release/app-release.apk out/Prism.apk
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Prism-apk
+          path: prism-keyboard/out/Prism.apk
+
+      - name: Publish release (direct download link for the phone)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="prism-v0.1.${{ github.run_number }}"
+          gh release create "$TAG" out/Prism.apk \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "Prism Keyboard 0.1.${{ github.run_number }}" \
+            --notes "نسخه‌ی جدید کیبورد Prism. فایل Prism.apk رو روی گوشی دانلود و نصب کن." \
+            --latest
