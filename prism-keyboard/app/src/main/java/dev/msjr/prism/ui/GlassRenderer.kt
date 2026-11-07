@@ -287,10 +287,10 @@ half4 main(float2 coord) {
     float mag = curve * strength * (1.0 + 0.4 * press);
     float2 off = -n * mag;
 
-    float3 c;
-    c.r = float(bg.eval(coord + off * 1.12).r);
-    c.g = float(bg.eval(coord + off).g);
-    c.b = float(bg.eval(coord + off * 0.88).b);
+    float3 c = float3(
+        float(bg.eval(coord + off * 1.12).r),
+        float(bg.eval(coord + off).g),
+        float(bg.eval(coord + off * 0.88).b));
     float3 f = float3(0.0);
     f += float3(bg.eval(coord + off + float2(2.5, 1.5)).rgb);
     f += float3(bg.eval(coord + off + float2(-2.5, -1.5)).rgb);
