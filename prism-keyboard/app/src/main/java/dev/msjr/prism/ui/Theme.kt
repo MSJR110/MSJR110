@@ -19,11 +19,11 @@ class Theme(
     val label: Int = if (dark) Color.WHITE else Color.rgb(18, 20, 28)
     val labelDim: Int = if (dark) Color.argb(150, 255, 255, 255) else Color.argb(140, 18, 20, 28)
     /** glass tint mixed over refracted backdrop (alpha = amount) */
-    val keyTint: Int = if (dark) Color.argb(46, 255, 255, 255) else Color.argb(150, 255, 255, 255)
-    val modTint: Int = if (dark) Color.argb(22, 255, 255, 255) else Color.argb(80, 236, 240, 248)
+    val keyTint: Int = if (dark) Color.argb(34, 255, 255, 255) else Color.argb(140, 255, 255, 255)
+    val modTint: Int = if (dark) Color.argb(13, 255, 255, 255) else Color.argb(64, 236, 240, 248)
     /** wash laid over the backdrop so labels stay readable */
-    val veil: Int = if (dark) Color.argb(70, 4, 6, 14) else Color.argb(80, 255, 255, 255)
-    val shadow: Int = if (dark) Color.argb(90, 0, 0, 0) else Color.argb(40, 30, 40, 80)
+    val veil: Int = if (dark) Color.argb(50, 4, 6, 14) else Color.argb(60, 255, 255, 255)
+    val shadow: Int = if (dark) Color.argb(72, 0, 0, 0) else Color.argb(28, 30, 40, 80)
     val rimTop: Int = if (dark) Color.argb(150, 255, 255, 255) else Color.argb(255, 255, 255, 255)
     val rimBottom: Int = if (dark) Color.argb(36, 255, 255, 255) else Color.argb(70, 120, 130, 160)
 

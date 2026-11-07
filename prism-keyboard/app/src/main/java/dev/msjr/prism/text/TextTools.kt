@@ -20,7 +20,10 @@ object TextTools {
         return false
     }
 
-    /** Arabic → Persian letter forms so dictionary lookups match. */
+    /**
+     * Lookup key for a Persian word: Arabic letter forms → Persian, no diacritics, no half-space.
+     * ("می‌خوام", "میخوام" and "مي‌خوام" are all the same word.)
+     */
     fun normalizeFa(s: String): String {
         if (s.isEmpty()) return s
         val sb = StringBuilder(s.length)
@@ -28,10 +31,52 @@ object TextTools {
             when (c) {
                 'ي', 'ى' -> sb.append('ی') // ي ى → ی
                 'ك' -> sb.append('ک')           // ك → ک
+                ZWNJ -> {}
                 else -> if (!isDiacritic(c)) sb.append(c)
             }
         }
         return sb.toString()
+    }
+
+    // ---------------------------------------------------------------- half-space in dictionary words
+
+    private const val NON_JOINING = "اآدذرزژوأإؤ"
+
+    /** Words that look like "می + verb" or "noun + ها" but aren't. */
+    private val zwnjExceptions = setOf(
+        "میدان", "میمون", "میون", "میهمان", "میهمون", "میهمانی", "میان", "میانه", "میانی", "میانسال", "میگو",
+        "میلر", "میرا", "میراندا", "میراندو", "مینا", "میجر", "مینگ", "میکس", "میلک", "میلت", "میونگ", "میلوا",
+        "میزها", "میسر", "میتو", "میجا", "مینتون", "میکا", "میلا", "میلو", "میتا", "میکر", "میرنا", "میست",
+        "میات", "میگز", "میرکت", "میلی", "میکی", "میله", "میلاد", "میلادی", "میزه", "میزم", "میسی", "میزی",
+        "مینه", "میستی", "میونی", "میسه", "مینی", "میدنی",
+        "تنها", "تنهایی", "تنهای", "آنها", "اینها", "منتها", "منهای", "بینهایت", "درنهایت", "شانگهای",
+    )
+    private val pluralSuffixes = listOf("هایشان", "هایتان", "هایمان", "هایم", "هایت", "هایش", "هایی", "های", "ها")
+
+    /**
+     * Put the half-space back into a dictionary word that lost it ("میخوام" → "می‌خوام",
+     * "کتابها" → "کتاب‌ها"), using the dictionary itself as evidence: the verb must also exist
+     * as "ب…" ("بخوام"), the noun must exist on its own ("کتاب").
+     */
+    fun restoreZwnj(w: String, freq: (String) -> Int): String {
+        if (w.length < 3 || w in zwnjExceptions || w.indexOf(ZWNJ) >= 0) return w
+        for (pre in arrayOf("نمی", "می")) {
+            if (w.startsWith(pre) && w.length > pre.length + 1) {
+                val rest = w.substring(pre.length)
+                if (freq("ب$rest") >= 20 || (rest[0] == 'ا' && freq("بی" + rest.substring(1)) > 0)) {
+                    return pre + ZWNJ + rest
+                }
+            }
+        }
+        for (suf in pluralSuffixes) {
+            if (w.endsWith(suf) && w.length > suf.length + 1) {
+                val stem = w.substring(0, w.length - suf.length)
+                if (NON_JOINING.indexOf(stem.last()) >= 0) return w
+                if (stem.length >= 2 && freq(stem) >= 30) return stem + ZWNJ + suf
+                return w
+            }
+        }
+        return w
     }
 
     // ---------------------------------------------------------------- smart half-space

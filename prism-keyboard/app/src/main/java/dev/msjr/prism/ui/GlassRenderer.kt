@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.BitmapShader
+import android.graphics.BlurMaskFilter
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.LinearGradient
@@ -54,6 +55,14 @@ class GlassRenderer(private val ctx: Context) {
     private val tmp = RectF()
     private val glowPaint = Paint(Paint.ANTI_ALIAS_FLAG)
 
+    /** Bumped whenever anything that changes how keys look changes (theme, backdrop…). */
+    var generation = 0
+        private set
+
+    private var glowShader: RadialGradient? = null
+    private var glowKey = 0L
+    private val glowMatrix = Matrix()
+
     private var runtimeBroken = false
     val usesRefraction: Boolean get() = runtime != null && refractionWanted && !runtimeBroken
 
@@ -67,7 +76,9 @@ class GlassRenderer(private val ctx: Context) {
             floatArrayOf(0f, 0.55f, 1f), Shader.TileMode.CLAMP)
         rimPaint.shader = rimShader
         shadowPaint.color = theme.shadow
+        if (Build.VERSION.SDK_INT >= 28) shadowPaint.maskFilter = BlurMaskFilter(2.2f * density, BlurMaskFilter.Blur.NORMAL)
         if (changed) backdropKey = ""
+        generation++
     }
 
     /** Invalidate a cached backdrop, e.g. when the user picks a new photo. */
@@ -88,6 +99,7 @@ class GlassRenderer(private val ctx: Context) {
                 ?: makeAurora(width, height)
             backdrop = bmp
             backdropShader = BitmapShader(bmp, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
+            generation++
         }
         backdropMatrix.setTranslate(0f, top)
         backdropShader?.setLocalMatrix(backdropMatrix)
@@ -107,10 +119,19 @@ class GlassRenderer(private val ctx: Context) {
     fun drawGlow(canvas: Canvas, x: Float, y: Float, alpha: Float, radius: Float) {
         if (alpha <= 0.01f) return
         val c = theme.accent
-        val a = (alpha * (if (theme.dark) 90 else 70)).toInt().coerceIn(0, 255)
-        glowPaint.shader = RadialGradient(x, y, radius,
-            intArrayOf(Color.argb(a, Color.red(c), Color.green(c), Color.blue(c)), Color.TRANSPARENT),
-            null, Shader.TileMode.CLAMP)
+        // one cached gradient, moved with a matrix and faded with paint alpha (no per-frame allocation)
+        val k = (c.toLong() shl 32) or radius.toRawBits().toLong()
+        if (glowShader == null || k != glowKey) {
+            val a = if (theme.dark) 90 else 70
+            glowShader = RadialGradient(0f, 0f, radius,
+                intArrayOf(Color.argb(a, Color.red(c), Color.green(c), Color.blue(c)), Color.TRANSPARENT),
+                null, Shader.TileMode.CLAMP)
+            glowKey = k
+        }
+        glowMatrix.setTranslate(x, y)
+        glowShader?.setLocalMatrix(glowMatrix)
+        glowPaint.shader = glowShader
+        glowPaint.alpha = (alpha * 255).toInt().coerceIn(0, 255)
         canvas.drawCircle(x, y, radius, glowPaint)
     }
 
@@ -120,14 +141,15 @@ class GlassRenderer(private val ctx: Context) {
      */
     fun drawGlass(
         canvas: Canvas, r: RectF, radius: Float, press: Float,
-        tint: Int, tintAlpha: Float, shadow: Boolean = true, rim: Boolean = true,
+        tint: Int, tintAlpha: Float, shadow: Boolean = true, rim: Boolean = !usesRefraction,
     ) {
         val inflate = press * 1.2f * density
         tmp.set(r.left - inflate, r.top - inflate, r.right + inflate, r.bottom + inflate)
         val rad = radius + inflate
 
         if (shadow) {
-            val dy = (1.1f + press * 1.5f) * density
+            // a soft contact shadow (blurred on Android 9+), a little deeper when pressed
+            val dy = (1.6f + press * 1.4f) * density
             canvas.drawRoundRect(tmp.left, tmp.top + dy, tmp.right, tmp.bottom + dy, rad, rad, shadowPaint)
         }
 
@@ -137,8 +159,9 @@ class GlassRenderer(private val ctx: Context) {
             rs.setFloatUniform("center", tmp.centerX(), tmp.centerY())
             rs.setFloatUniform("halfSize", tmp.width() / 2f, tmp.height() / 2f)
             rs.setFloatUniform("radius", min(rad, min(tmp.width(), tmp.height()) / 2f))
-            rs.setFloatUniform("bezel", max(4f, min(tmp.width(), tmp.height()) * 0.32f))
-            rs.setFloatUniform("strength", (4f + 12f * strength) * density)
+            rs.setFloatUniform("bezel", max(3f, min(tmp.width(), tmp.height()) * 0.275f))
+            rs.setFloatUniform("strength", (5f + 14f * strength) * density)
+            rs.setFloatUniform("px1", density)
             rs.setFloatUniform("tint", Color.red(tint) / 255f, Color.green(tint) / 255f, Color.blue(tint) / 255f, tintAlpha)
             rs.setFloatUniform("press", press)
             rs.setFloatUniform("dark", if (theme.dark) 1f else 0f)
@@ -257,7 +280,12 @@ class GlassRenderer(private val ctx: Context) {
         fun adjustAlpha(c: Int, f: Float) =
             Color.argb((Color.alpha(c) * f).toInt().coerceIn(0, 255), Color.red(c), Color.green(c), Color.blue(c))
 
-        /** Liquid glass: rounded-rect lens with refraction, dispersion, frost and specular rim. */
+        /**
+         * Liquid glass: a rounded-rect lens. Clear, slightly magnified centre; light bends only near
+         * the edge (with a touch of colour dispersion); a thin bright glint along the rim that faces
+         * the light and a softer one opposite; tint is screen-blended so the glass brightens instead
+         * of turning grey.
+         */
         val GLASS_AGSL = """
 uniform shader bg;
 uniform float2 center;
@@ -268,6 +296,7 @@ uniform float strength;
 uniform float4 tint;
 uniform float press;
 uniform float dark;
+uniform float px1;
 
 float sdRoundRect(float2 p, float2 b, float r) {
     float2 q = abs(p) - b + float2(r, r);
@@ -283,39 +312,37 @@ half4 main(float2 coord) {
     n = n / max(length(n), 0.0001);
 
     float edge = clamp(1.0 + d / bezel, 0.0, 1.0);
-    float curve = edge * edge;
-    float mag = curve * strength * (1.0 + 0.4 * press);
-    float2 off = -n * mag;
+    float curve = edge * edge * edge;
+    float mag = curve * strength * (1.0 + 0.35 * press);
+    float zoom = 0.10 + 0.04 * press;
+    float2 s = coord - p * zoom - n * mag;
+    float2 off = s - coord;
 
     float3 c = float3(
-        float(bg.eval(coord + off * 1.12).r),
-        float(bg.eval(coord + off).g),
-        float(bg.eval(coord + off * 0.88).b));
-    float3 f = float3(0.0);
-    f += float3(bg.eval(coord + off + float2(2.5, 1.5)).rgb);
-    f += float3(bg.eval(coord + off + float2(-2.5, -1.5)).rgb);
-    f += float3(bg.eval(coord + off + float2(1.5, -2.5)).rgb);
-    f += float3(bg.eval(coord + off + float2(-1.5, 2.5)).rgb);
-    c = mix(c, f * 0.25, 0.45);
+        float(bg.eval(coord + off * 1.10).r),
+        float(bg.eval(s).g),
+        float(bg.eval(coord + off * 0.90).b));
+    float3 f = float3(bg.eval(s + float2(3.0, 2.0)).rgb) + float3(bg.eval(s + float2(-3.0, -2.0)).rgb)
+        + float3(bg.eval(s + float2(2.0, -3.0)).rgb) + float3(bg.eval(s + float2(-2.0, 3.0)).rgb);
+    c = mix(c, f * 0.25, 0.5);
 
     float luma = dot(c, float3(0.299, 0.587, 0.114));
-    c = clamp(mix(float3(luma), c, 1.35), 0.0, 1.0);
+    c = clamp(mix(float3(luma), c, 1.5), 0.0, 1.0);
+    c = float3(1.0) - (float3(1.0) - c) * (float3(1.0) - tint.rgb * tint.a);
 
-    c = mix(c, tint.rgb, tint.a);
+    float vy = clamp(p.y / max(halfSize.y, 1.0) * 0.5 + 0.5, 0.0, 1.0);
+    c += float3((0.05 + 0.02 * dark) * (1.0 - vy) * (1.0 - vy));
 
-    float2 L = normalize(float2(-0.35, -1.0));
+    float2 L = normalize(float2(-0.45, -1.0));
     float lit = dot(n, L);
-    float spec = pow(max(lit, 0.0), 3.0) * curve + 0.45 * pow(max(-lit, 0.0), 4.0) * curve;
-    float rim = smoothstep(-2.5, 0.0, d);
-    c += float3(spec * (0.42 + 0.3 * press) + rim * 0.10);
-    float shade = max(-lit, 0.0) * curve * 0.5;
-    c -= float3(shade * (0.06 + 0.06 * dark));
-
-    float body = 1.0 - edge;
-    c += float3(press * (0.10 + 0.08 * body));
+    float band = clamp(1.0 + d / (1.6 * px1), 0.0, 1.0);
+    band = band * band;
+    float glint = band * (0.55 * pow(max(lit, 0.0), 1.5) + 0.28 * pow(max(-lit, 0.0), 2.0) + 0.08);
+    float spec = curve * 0.22 * pow(max(lit, 0.0), 4.0);
+    c += float3(glint * (1.0 + 0.4 * press) + spec + press * 0.10);
 
     float aa = clamp(0.5 - d, 0.0, 1.0);
-    return half4(half3(c * aa), half(aa));
+    return half4(half3(clamp(c, 0.0, 1.0) * aa), half(aa));
 }
 """
     }

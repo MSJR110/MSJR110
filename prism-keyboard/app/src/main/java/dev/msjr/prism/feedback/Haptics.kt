@@ -2,6 +2,9 @@ package dev.msjr.prism.feedback
 
 import android.content.Context
 import android.os.Build
+import android.os.Handler
+import android.os.HandlerThread
+import android.os.Process
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -19,6 +22,10 @@ class Haptics(ctx: Context) {
             ctx.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
         }
     } catch (_: Throwable) { null }
+
+    // vibrate() is a call into the system that can take a few ms; keep it off the UI thread
+    private val thread = HandlerThread("prism-haptics", Process.THREAD_PRIORITY_URGENT_DISPLAY).apply { start() }
+    private val worker = Handler(thread.looper)
 
     private var strength = 0.55f
     private var keyEffect: VibrationEffect? = null
@@ -58,8 +65,10 @@ class Haptics(ctx: Context) {
 
     private fun play(e: VibrationEffect?) {
         if (e == null) return
-        try { vibrator?.vibrate(e) } catch (_: Throwable) { }
+        worker.post { try { vibrator?.vibrate(e) } catch (_: Throwable) { } }
     }
+
+    fun shutdown() { thread.quitSafely() }
 
     fun key() = play(keyEffect)
     fun modifier() = play(modEffect)

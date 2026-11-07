@@ -63,9 +63,20 @@ class SoundEngine(private val ctx: Context) {
         }.apply { priority = Thread.MIN_PRIORITY; start() }
     }
 
+    private var ringerNormal = true
+    private var ringerCheckedAt = 0L
+
     fun play(kind: Kind) {
         if (pack == "off" || volume <= 0f) return
-        if (respectSilent && audio.ringerMode != AudioManager.RINGER_MODE_NORMAL) return
+        if (respectSilent) {
+            // asking the system for the ringer mode on every key is a cross-process call; once a second is plenty
+            val now = android.os.SystemClock.uptimeMillis()
+            if (now - ringerCheckedAt > 1000) {
+                ringerNormal = audio.ringerMode == AudioManager.RINGER_MODE_NORMAL
+                ringerCheckedAt = now
+            }
+            if (!ringerNormal) return
+        }
         if (pack == "system") {
             val fx = when (kind) {
                 Kind.KEY -> AudioManager.FX_KEYPRESS_STANDARD

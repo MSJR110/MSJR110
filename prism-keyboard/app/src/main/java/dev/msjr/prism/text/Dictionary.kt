@@ -53,9 +53,10 @@ class Dictionary private constructor(
     fun bucket(len: Int): IntArray = if (len in byLength.indices) byLength[len] else IntArray(0)
 
     companion object {
-        fun load(ctx: Context, asset: String): Dictionary = fromStream(ctx.assets.open(asset))
+        fun load(ctx: Context, asset: String, persian: Boolean = false): Dictionary =
+            fromStream(ctx.assets.open(asset), persian)
 
-        fun fromStream(input: java.io.InputStream): Dictionary {
+        fun fromStream(input: java.io.InputStream, persian: Boolean = false): Dictionary {
             val ks = ArrayList<String>(48000)
             val ws = ArrayList<String>(48000)
             val fs = ArrayList<Int>(48000)
@@ -68,6 +69,12 @@ class Dictionary private constructor(
                     val f = line.substring(tab + 1).toIntOrNull() ?: 1
                     ws += w; ks += w.lowercase(); fs += f
                 }
+            }
+            if (persian) {
+                // the word list has no half-spaces; restore them for display (keys stay without)
+                val freq = HashMap<String, Int>(ws.size * 2)
+                for (i in ws.indices) freq[ws[i]] = fs[i]
+                for (i in ws.indices) ws[i] = TextTools.restoreZwnj(ws[i]) { freq[it] ?: 0 }
             }
             val order = ks.indices.sortedWith { a, b -> ks[a].compareTo(ks[b]) }
             val keys = Array(order.size) { ks[order[it]] }

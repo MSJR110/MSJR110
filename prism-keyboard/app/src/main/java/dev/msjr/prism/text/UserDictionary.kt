@@ -13,6 +13,12 @@ class UserDictionary(private val dir: File, private val lang: String) {
     private var dirty = 0
     private val file get() = File(dir, "user_$lang.tsv")
 
+    /** Same key the suggestion engine uses, so "می‌خوام" and "میخوام" count as one word. */
+    private fun norm(w: String): String = if (lang == "fa") TextTools.normalizeFa(w).lowercase() else w.lowercase()
+
+    private fun betterDisplay(old: String?, new: String): Boolean =
+        old == null || (new.indexOf(TextTools.ZWNJ) >= 0 && old.indexOf(TextTools.ZWNJ) < 0)
+
     @Synchronized
     fun load() {
         words.clear(); display.clear(); bigrams.clear()
@@ -23,12 +29,14 @@ class UserDictionary(private val dir: File, private val lang: String) {
                 val p = line.split('\t')
                 when {
                     p.size == 3 && p[0] == "w" -> {
-                        val k = p[1].lowercase()
-                        words[k] = p[2].toIntOrNull() ?: 1
-                        display[k] = p[1]
+                        val k = norm(p[1])
+                        words[k] = (words[k] ?: 0) + (p[2].toIntOrNull() ?: 1)
+                        if (betterDisplay(display[k], p[1]) || (lang != "fa" && p[1] != k)) display[k] = p[1]
                     }
                     p.size == 4 && p[0] == "b" -> {
-                        bigrams.getOrPut(p[1]) { HashMap() }[p[2]] = p[3].toIntOrNull() ?: 1
+                        val m = bigrams.getOrPut(norm(p[1])) { HashMap() }
+                        val k = norm(p[2])
+                        m[k] = (m[k] ?: 0) + (p[3].toIntOrNull() ?: 1)
                     }
                 }
             }
@@ -38,12 +46,13 @@ class UserDictionary(private val dir: File, private val lang: String) {
     @Synchronized
     fun learn(word: String, prev: String?) {
         if (word.isEmpty() || word.length > 40) return
-        val k = word.lowercase()
+        val k = norm(word)
+        if (k.isEmpty()) return
         words[k] = minOf((words[k] ?: 0) + 1, 100000)
-        // keep the capitalisation the user actually uses for proper nouns
-        if (word != k || display[k] == null) display[k] = word
+        // keep the capitalisation the user actually uses for proper nouns, and the half-space spelling
+        if (betterDisplay(display[k], word) || (lang != "fa" && word != k)) display[k] = word
         if (!prev.isNullOrEmpty()) {
-            val m = bigrams.getOrPut(prev.lowercase()) { HashMap() }
+            val m = bigrams.getOrPut(norm(prev)) { HashMap() }
             m[k] = minOf((m[k] ?: 0) + 1, 100000)
             if (m.size > 64) {
                 // forget the rarest follower
@@ -55,7 +64,7 @@ class UserDictionary(private val dir: File, private val lang: String) {
 
     @Synchronized
     fun forget(word: String) {
-        val k = word.lowercase()
+        val k = norm(word)
         words.remove(k); display.remove(k)
         for (m in bigrams.values) m.remove(k)
         dirty++

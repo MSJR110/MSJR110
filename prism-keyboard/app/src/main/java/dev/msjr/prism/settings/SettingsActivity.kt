@@ -138,7 +138,7 @@ class SettingsActivity : Activity() {
             c.addView(button("انتخاب عکس پس‌زمینه") { pickImage() })
             c.addView(slider("شدت شیشه", Prefs.GLASS_STRENGTH, 70, 0, 100))
             c.addView(toggle("شکست نور (لیکوئید گلس واقعی)", "دکمه‌ها پس‌زمینه رو مثل شیشه خم می‌کنن", Prefs.REFRACTION, true))
-            c.addView(toggle("نور زیر انگشت", "یه هاله‌ی نرم دنبال انگشتت میاد", Prefs.GLOW, true))
+            c.addView(toggle("نور زیر انگشت", "یه هاله‌ی نرم دنبال انگشتت میاد", Prefs.GLOW, false))
             c.addView(slider("ارتفاع کیبورد", Prefs.HEIGHT, 100, 80, 130, suffix = "٪"))
             c.addView(toggle("ردیف اعداد", "یه ردیف عدد بالای حروف", Prefs.NUMBER_ROW, false))
             c.addView(button("برداشتن دکمه‌ی ⌨ زیر کیبورد") {
@@ -167,7 +167,7 @@ class SettingsActivity : Activity() {
         card("نوشتن") { c ->
             c.addView(toggle("پیشنهاد کلمه", "نوار پیشنهاد بالای کیبورد", Prefs.SUGGESTIONS, true))
             c.addView(toggle("تصحیح خودکار انگلیسی", "با زدن فاصله غلط‌ها درست می‌شن (⌫ برمی‌گردونه)", Prefs.AUTOCORRECT, true))
-            c.addView(toggle("تصحیح خودکار فارسی", "آزمایشی", Prefs.AUTOCORRECT_FA, false))
+            c.addView(toggle("تصحیح خودکار فارسی", "غلط تایپی رو موقع اسپیس درست می‌کنه؛ با ⌫ برمی‌گرده", Prefs.AUTOCORRECT_FA, true))
             c.addView(toggle("حرف بزرگ خودکار", "اول جمله‌های انگلیسی", Prefs.AUTOCAP, true))
             c.addView(toggle("دو بار فاصله = نقطه", "مثل آیفون", Prefs.DOUBLE_SPACE, true))
             c.addView(toggle("نیم‌فاصله‌ی هوشمند", "«می خواهم» ← «می‌خواهم» و «کتاب ها» ← «کتاب‌ها»", Prefs.SMART_ZWNJ, true))

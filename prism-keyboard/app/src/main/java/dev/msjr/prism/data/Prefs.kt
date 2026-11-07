@@ -64,7 +64,7 @@ object Prefs {
             soundRespectSilent = p.getBoolean(SOUND_RESPECT_SILENT, true),
             suggestions = p.getBoolean(SUGGESTIONS, true),
             autocorrect = p.getBoolean(AUTOCORRECT, true),
-            autocorrectFa = p.getBoolean(AUTOCORRECT_FA, false),
+            autocorrectFa = p.getBoolean(AUTOCORRECT_FA, true),
             autocap = p.getBoolean(AUTOCAP, true),
             doubleSpace = p.getBoolean(DOUBLE_SPACE, true),
             smartZwnj = p.getBoolean(SMART_ZWNJ, true),
@@ -77,7 +77,7 @@ object Prefs {
             lang = p.getString(LANG, "fa") ?: "fa",
             font = p.getString(FONT, "vazir") ?: "vazir",
             swipeDelete = p.getBoolean(SWIPE_DELETE, true),
-            glow = p.getBoolean(GLOW, true),
+            glow = p.getBoolean(GLOW, false),
         )
     }
 }

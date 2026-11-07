@@ -6,6 +6,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
+import android.graphics.RenderNode
 import android.graphics.Typeface
 import android.os.Build
 import android.os.Handler
@@ -162,9 +163,9 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         layout?.let { l ->
             for (k in l.allKeys) {
                 if (k.press != k.pressTarget || abs(k.pressVel) > 0.001f) {
-                    // fast in, soft wobbly out — the "liquid" feel
-                    val stiff = if (k.pressTarget > k.press) 1700f else 420f
-                    val damp = if (k.pressTarget > k.press) 0.9f else 0.42f
+                    // instant in, quick release with one small liquid overshoot
+                    val stiff = if (k.pressTarget > k.press) 2600f else 900f
+                    val damp = if (k.pressTarget > k.press) 1f else 0.68f
                     springStep(k, stiff, damp, dt)
                     if (abs(k.press - k.pressTarget) < 0.002f && abs(k.pressVel) < 0.01f) {
                         k.press = k.pressTarget; k.pressVel = 0f
@@ -189,7 +190,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         }
         val previewTarget = if (pointers.values.any { it.previewKey != null }) 1f else 0f
         if (previewScale != previewTarget) {
-            previewScale += (previewTarget - previewScale) * min(1f, dt * 30f)
+            previewScale = if (previewTarget > previewScale) previewTarget else previewScale + (previewTarget - previewScale) * min(1f, dt * 30f)
             if (abs(previewScale - previewTarget) < 0.01f) previewScale = previewTarget else busy = true
         }
         val popTarget = if (popupPtr != null) 1f else 0f
@@ -344,23 +345,57 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
 
     // ------------------------------------------------------------------ drawing
 
+    // The resting keyboard (backdrop + every key unpressed) is recorded once into a GPU layer and
+    // reused every frame; only keys that are moving get drawn on top. That keeps each frame cheap
+    // even though every key is a refraction shader.
+    private val restNode: RenderNode? = if (Build.VERSION.SDK_INT >= 29) RenderNode("prism-keys") else null
+    private var restSig: List<Any?>? = null
+
+    private fun restSignature(l: KeyboardLayout): List<Any?> = listOf(
+        l, width, height, shiftState, enterAction, langLabel, settings, glass.generation, oneHandArea.left, oneHandArea.right,
+    )
+
+    private fun drawResting(c: Canvas, l: KeyboardLayout, th: Theme) {
+        glass.drawBackdrop(c)
+        for (k in l.allKeys) drawKey(c, k, th, l, 0f)
+        if (!oneHandArea.isEmpty) drawOneHandSide(c, th)
+    }
+
     override fun onDraw(canvas: Canvas) {
         val l = layout ?: return
         val th = glass.theme
         glass.ensureBackdrop(width, (height - extraTop).toInt(), extraTop, settings?.bgMode ?: "aurora")
-        glass.drawBackdrop(canvas)
 
-        if (glowAlpha > 0f && settings?.glow != false) glass.drawGlow(canvas, glowX, glowY, glowAlpha, 90 * dp)
-
-        drawStrip(canvas, th)
-
-        when (mode) {
-            Mode.KEYS -> {
-                for (k in l.allKeys) drawKey(canvas, k, th, l)
-                if (!oneHandArea.isEmpty) drawOneHandSide(canvas, th)
+        val node = restNode
+        val cached = node != null && mode == Mode.KEYS && labelAlpha >= 0.999f && canvas.isHardwareAccelerated
+        if (cached && node != null) {
+            val sig = restSignature(l)
+            if (sig != restSig || !node.hasDisplayList()) {
+                node.setPosition(0, 0, width, height)
+                node.setUseCompositingLayer(true, null)
+                val rc = node.beginRecording(width, height)
+                try { drawResting(rc, l, th) } finally { node.endRecording() }
+                restSig = sig
             }
-            Mode.EMOJI -> drawEmojiPanel(canvas, th)
-            Mode.CLIPBOARD -> drawClipboardPanel(canvas, th)
+            canvas.drawRenderNode(node)
+            // only what's moving is drawn live, on top of its resting copy
+            for (k in l.allKeys) {
+                if (k.press > 0.004f || k.pressTarget > 0f) drawKey(canvas, k, th, l, max(0f, k.press))
+            }
+            if (glowAlpha > 0f && settings?.glow == true) glass.drawGlow(canvas, glowX, glowY, glowAlpha * 0.5f, 90 * dp)
+            drawStrip(canvas, th)
+        } else {
+            glass.drawBackdrop(canvas)
+            if (glowAlpha > 0f && settings?.glow == true) glass.drawGlow(canvas, glowX, glowY, glowAlpha, 90 * dp)
+            drawStrip(canvas, th)
+            when (mode) {
+                Mode.KEYS -> {
+                    for (k in l.allKeys) drawKey(canvas, k, th, l, k.press)
+                    if (!oneHandArea.isEmpty) drawOneHandSide(canvas, th)
+                }
+                Mode.EMOJI -> drawEmojiPanel(canvas, th)
+                Mode.CLIPBOARD -> drawClipboardPanel(canvas, th)
+            }
         }
 
         // floating stuff
@@ -386,9 +421,9 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         else -> false
     }
 
-    private fun drawKey(canvas: Canvas, k: Key, th: Theme, l: KeyboardLayout) {
+    private fun drawKey(canvas: Canvas, k: Key, th: Theme, l: KeyboardLayout, press: Float) {
         val (tint, ta) = tintFor(k, th)
-        glass.drawGlass(canvas, k.rect, radius, k.press.coerceIn(-0.2f, 1.3f), tint, ta)
+        glass.drawGlass(canvas, k.rect, radius, press.coerceIn(-0.2f, 1.3f), tint, ta)
         if (labelAlpha <= 0.01f) return
         val shiftOn = shiftState != 0
         val labelColor = if (k.type == KeyType.SHIFT && shiftOn && !th.dark) Color.BLACK
@@ -460,7 +495,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
                     } else {
                         hintPaint.textSize = 10.5f * sp
                         val hx = if (l.rtl) k.rect.left + 8 * dp else k.rect.right - 7 * dp
-                        canvas.drawText(h, hx, k.rect.top + 14 * dp, hintPaint)
+                        canvas.drawText(shown(h), hx, k.rect.top + 14 * dp, hintPaint)
                     }
                 }
             }
@@ -471,6 +506,10 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         val shiftOn = shiftState != 0
         return if (shiftOn && k.label.length == 1 && k.label[0].isLetter()) k.label.uppercase() else k.label
     }
+
+    /** A lone diacritic (َ ُ ِ ّ …) gets an invisible base so it isn't drawn on a dotted circle. */
+    private fun shown(s: String): String =
+        if (s.length == 1 && Character.getType(s[0]) == Character.NON_SPACING_MARK.toInt()) "\u00A0$s" else s
 
     private fun drawCentered(c: Canvas, text: String, cx: Float, cy: Float, p: Paint) {
         val fm = p.fontMetrics
@@ -484,7 +523,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
     private fun drawPreview(canvas: Canvas, k: Key, p: Ptr, th: Theme) {
         if (settings?.keyPreview == false || k.type != KeyType.CHAR || popupPtr === p) return
         if (layout?.id == "num") return
-        val text = if (p.flick && k.hint != null) k.hint else displayLabel(k)
+        val text = shown(if (p.flick && k.hint != null) k.hint else displayLabel(k))
         val sc = 0.6f + 0.4f * previewScale
         val w = max(k.rect.width() * 1.45f, 52 * dp) * sc
         val h = k.rect.height() * 1.25f * sc
@@ -571,7 +610,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
             labelPaint.textSize = (if (s.length > 2) 15f else 24f) * sp
             labelPaint.color = if (i == p.popupIndex) Color.WHITE else th.label
             labelPaint.alpha = 255
-            drawCentered(canvas, s, tmpRect.centerX(), tmpRect.centerY(), labelPaint)
+            drawCentered(canvas, shown(s), tmpRect.centerX(), tmpRect.centerY(), labelPaint)
         }
         if (rows > 1) { /* rows drawn above */ }
         canvas.restore()
@@ -950,6 +989,8 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         var longFired = false
         var popupIndex = -1
         var flick = false
+        /** the alternate came from holding the key (not a flick), so moving the finger keeps it */
+        var flickByLong = false
         var committed = false
         var accX = 0f; var accY = 0f
         var repeat = 0
@@ -1033,7 +1074,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         p.downX = x; p.downY = y; p.x = x; p.y = y; p.lastX = x; p.lastY = y
         p.downTime = System.currentTimeMillis()
         pointers[id] = p
-        glowX = x; glowY = y; glowAlpha = 1f
+        glowX = x; glowY = y; if (settings?.glow == true) glowAlpha = 1f
 
         // strip
         if (stripArea.contains(x, y)) {
@@ -1082,7 +1123,10 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         p.key = k
         p.mode = PMode.KEY
         k.pressTarget = 1f
+        k.press = max(k.press, 0.85f); k.pressVel = 0f
         if (k.type == KeyType.CHAR || k.type == KeyType.ZWNJ) p.previewKey = if (k.type == KeyType.CHAR) k else null
+        if (p.previewKey != null) previewScale = 1f
+        invalidate()
 
         listener?.onKeyFeedback(k, FEEDBACK_DOWN)
         val lp = (settings?.longPressMs ?: 320).toLong()
@@ -1104,7 +1148,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         val dx = x - p.lastX; val dy = y - p.lastY
         p.lastX = x; p.lastY = y
         p.x = x; p.y = y
-        if (p.mode != PMode.PANEL_SCROLL && p.mode != PMode.PANEL_TAP) { glowX = x; glowY = y; glowAlpha = 1f }
+        if (p.mode != PMode.PANEL_SCROLL && p.mode != PMode.PANEL_TAP) { glowX = x; glowY = y; if (settings?.glow == true) glowAlpha = 1f }
         when (p.mode) {
             PMode.KEY -> {
                 val k = p.key ?: return
@@ -1128,16 +1172,22 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
                         }
                     }
                     KeyType.CHAR -> {
+                        if (p.flickByLong) return
                         val upDist = p.downY - y
-                        if (k.hint != null && upDist > k.rect.height() * 0.45f && abs(x - p.downX) < k.rect.width() * 0.9f) {
+                        // a deliberate flick up: well past the key's middle and mostly vertical,
+                        // so a thumb rolling off a key while tapping doesn't type the corner letter
+                        if (k.hint != null && upDist > k.rect.height() * 0.7f && abs(x - p.downX) < upDist * 0.7f) {
                             if (!p.flick) { p.flick = true; ui.removeCallbacks(p.longPress); invalidate() }
                             return
-                        } else if (p.flick && upDist < k.rect.height() * 0.25f) {
+                        } else if (p.flick && upDist < k.rect.height() * 0.4f) {
                             p.flick = false; invalidate()
                         }
                         if (!p.flick) {
-                            // slide to correct: the key under the finger wins
-                            val nk = keyAt(x, y)
+                            // slide to correct: only once the finger is clearly inside another key,
+                            // so the small drift of a fast tap never changes the letter
+                            val outX = max(0f, max(k.hit.left - x, x - k.hit.right))
+                            val outY = max(0f, max(k.hit.top - y, y - k.hit.bottom))
+                            val nk = if (outX > k.rect.width() * 0.4f || outY > k.rect.height() * 0.4f) keyAt(x, y) else null
                             if (nk != null && nk !== k && nk.type == KeyType.CHAR) {
                                 k.pressTarget = 0f
                                 nk.pressTarget = 1f
@@ -1238,6 +1288,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
                 if (items.size == 1 && k.hint != null && k.popup.size <= 1) {
                     // a single alternate: just switch the preview to it, typed on release
                     p.flick = true
+                    p.flickByLong = true
                     listener?.onKeyFeedback(null, FEEDBACK_TICK)
                     invalidate()
                     return

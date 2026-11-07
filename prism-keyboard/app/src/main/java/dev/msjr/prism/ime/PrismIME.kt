@@ -113,6 +113,7 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
         } catch (_: Throwable) { }
         engine.shutdown()
         sound.release()
+        haptics.shutdown()
         super.onDestroy()
     }
 
@@ -490,13 +491,21 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
                 finalWord = sc
             } else if (w.isNotEmpty() && allowAutocorrect && !midWord) {
                 val wl = wordLang(w)
-                val enabled = if (wl == "fa") settings.autocorrectFa else settings.autocorrect
                 val ac = suggestions.autoCorrect
+                // putting back a missing half-space is always on with smart half-space
+                val zwnjOnly = ac != null && ac.replace(TextTools.ZWNJ.toString(), "") == w.replace(TextTools.ZWNJ.toString(), "")
+                val enabled = if (wl == "fa") settings.autocorrectFa || (settings.smartZwnj && zwnjOnly) else settings.autocorrect
                 if (enabled && ac != null && suggestions.query == w && ac != w && w.lowercase() !in rejected) {
                     deleteBefore(w.length)
                     commit(ac)
                     undoCorrection = w to ac
                     finalWord = ac
+                } else if (suggestions.query != w && w.lowercase() !in rejected &&
+                    (if (wl == "fa") settings.autocorrectFa || settings.smartZwnj else settings.autocorrect)
+                ) {
+                    // space came faster than the suggestions: finish the check and fix the word right after
+                    val prev = prevWord
+                    engine.requestOnce(w, prev, wl) { r -> applyLateCorrection(w, r) }
                 }
             }
             // smart half-space for suffixes: "کتاب ها" → "کتاب‌ها"
@@ -519,6 +528,26 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
             finishWord(false)
             lastAutoSpace = false
             lastSpaceAt = now
+    }
+
+    private fun applyLateCorrection(w: String, r: SuggestionResult) {
+        val c = ic ?: return
+        val ac = r.autoCorrect ?: return
+        if (ac == w || w.lowercase() in rejected || word.isNotEmpty() || trackpadActive) return
+        val zwnjOnly = ac.replace(TextTools.ZWNJ.toString(), "") == w.replace(TextTools.ZWNJ.toString(), "")
+        val enabled = if (wordLang(w) == "fa") settings.autocorrectFa || (settings.smartZwnj && zwnjOnly) else settings.autocorrect
+        if (!enabled) return
+        // only while the cursor is still right after "word " (the person hasn't moved on)
+        if (c.getTextBeforeCursor(w.length + 1, 0)?.toString() != "$w ") return
+        c.beginBatchEdit()
+        try {
+            deleteBefore(w.length + 1)
+            commit("$ac ")
+        } finally {
+            c.endBatchEdit()
+        }
+        undoCorrection = w to ac
+        if (prevWord == w) prevWord = ac
     }
 
     override fun onEnter() {

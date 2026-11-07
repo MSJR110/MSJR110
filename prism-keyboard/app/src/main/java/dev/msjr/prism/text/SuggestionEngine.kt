@@ -51,7 +51,7 @@ class SuggestionEngine(private val ctx: Context) {
     init {
         worker.post {
             userFa.load(); userEn.load()
-            try { core.dictFa = Dictionary.load(ctx, "dict/fa.dict") } catch (_: Throwable) { }
+            try { core.dictFa = Dictionary.load(ctx, "dict/fa.dict", persian = true) } catch (_: Throwable) { }
             try { core.dictEn = Dictionary.load(ctx, "dict/en.dict") } catch (_: Throwable) { }
         }
     }
@@ -71,6 +71,14 @@ class SuggestionEngine(private val ctx: Context) {
     fun shutdown() {
         save(true)
         thread.quitSafely()
+    }
+
+    /** Like [request] but never dropped as stale (used to finish a correction after space was already typed). */
+    fun requestOnce(query: String, prev: String?, lang: String, callback: (SuggestionResult) -> Unit) {
+        worker.post {
+            val res = try { core.compute(query, prev, lang) } catch (_: Throwable) { SuggestionResult.EMPTY }
+            main.post { callback(res) }
+        }
     }
 
     fun request(query: String, prev: String?, lang: String, callback: (SuggestionResult) -> Unit) {
@@ -114,9 +122,15 @@ class SuggestionCore(val userFa: UserDictionary, val userEn: UserDictionary) {
         val q = key(query, lang)
         val cands = HashMap<String, Suggestion>()
         fun offer(word: String, kind: Suggestion.Kind, score: Float) {
-            val k = word.lowercase()
+            val k = key(word, lang)
             val old = cands[k]
-            if (old == null || old.score < score) cands[k] = Suggestion(word, kind, score)
+            if (old == null || old.score < score) {
+                // the same word with and without its half-space: show the correct spelling
+                val text = if (old != null && old.text.indexOf(TextTools.ZWNJ) >= 0 && word.indexOf(TextTools.ZWNJ) < 0) old.text else word
+                cands[k] = Suggestion(text, kind, score)
+            } else if (word.indexOf(TextTools.ZWNJ) >= 0 && old.text.indexOf(TextTools.ZWNJ) < 0) {
+                cands[k] = Suggestion(word, old.kind, old.score)
+            }
         }
 
         val userCount = user.count(q)
@@ -227,7 +241,12 @@ class SuggestionCore(val userFa: UserDictionary, val userEn: UserDictionary) {
         val bc = bestCorr
         val weakTyped = typedValid && !strongValid
         val allowAuto = !typedValid || (weakTyped && bestCorrFreq >= typedFreq + 80)
-        val autoLimit = when {
+        val autoLimit = if (lang == "fa") when {
+            // Persian has many short real words and colloquial spellings: only fix clear slips
+            q.length <= 3 -> 0.5f
+            q.length <= 5 -> 0.95f
+            else -> 1.4f
+        } else when {
             q.length <= 3 -> 0.6f   // short words: only swaps, neighbour keys, missing apostrophes
             q.length <= 4 -> 1.0f
             else -> 1.6f
@@ -238,6 +257,14 @@ class SuggestionCore(val userFa: UserDictionary, val userEn: UserDictionary) {
             if (top != null && top.text.equals(bc.text, ignoreCase = true)) {
                 auto = applyCase(query, bc.text, lang)
             }
+        }
+
+        // a real word typed without its half-space ("میخوام") → the proper spelling ("می‌خوام")
+        if (auto == null && lang == "fa" && dict != null && dictIdx >= 0) {
+            val proper = dict.words[dictIdx]
+            if (proper != query && proper.indexOf(TextTools.ZWNJ) >= 0 &&
+                proper.replace(TextTools.ZWNJ.toString(), "") == query.replace(TextTools.ZWNJ.toString(), "")
+            ) auto = proper
         }
 
         if (lang == "en" && query == "i") auto = "I"
