@@ -71,6 +71,12 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
 
     var listener: Listener? = null
 
+    /**
+     * Asked when a tap lands right on the border between two letters: return true to type [alt]
+     * instead of [primary] (the IME checks which one actually continues a word).
+     */
+    var charResolver: ((primary: String, alt: String) -> Boolean)? = null
+
     private val dp = resources.displayMetrics.density
     private val sp = resources.displayMetrics.scaledDensity
     private val ui = Handler(Looper.getMainLooper())
@@ -991,6 +997,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         var flick = false
         /** the alternate came from holding the key (not a flick), so moving the finger keeps it */
         var flickByLong = false
+        var downKey: Key? = null
         var committed = false
         var accX = 0f; var accY = 0f
         var repeat = 0
@@ -1110,17 +1117,22 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         }
 
         val k = keyAt(x, y) ?: return
-        // rollover: a second finger lands while the first is still on a character — type the first now
+        // rollover: a second finger lands while the first is still on a character or space —
+        // type the first one now so fast typing keeps its order
         for (o in pointers.values) {
-            if (o !== p && o.mode == PMode.KEY && !o.committed && o.key?.type == KeyType.CHAR && popupPtr !== o) {
-                commitChar(o)
-                o.committed = true
-                o.key?.pressTarget = 0f
-                o.previewKey = null
-                ui.removeCallbacks(o.longPress)
+            if (o === p || o.mode != PMode.KEY || o.committed || popupPtr === o) continue
+            when (o.key?.type) {
+                KeyType.CHAR -> commitChar(o)
+                KeyType.SPACE -> if (!o.longFired) listener?.onSpace() else continue
+                else -> continue
             }
+            o.committed = true
+            o.key?.pressTarget = 0f
+            o.previewKey = null
+            ui.removeCallbacks(o.longPress)
         }
         p.key = k
+        p.downKey = k
         p.mode = PMode.KEY
         k.pressTarget = 1f
         k.press = max(k.press, 0.85f); k.pressVel = 0f
@@ -1159,7 +1171,8 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
                 }
                 when (k.type) {
                     KeyType.SPACE -> {
-                        if (abs(x - p.downX) > max(14 * dp, k.rect.width() * 0.08f) && !p.longFired) {
+                        // a quick tap on space often slides a little: only a clear drag moves the cursor
+                        if (abs(x - p.downX) > max(24 * dp, k.rect.width() * 0.14f) && !p.longFired) {
                             ui.removeCallbacks(p.longPress)
                             startTrackpad(p)
                         }
@@ -1256,8 +1269,31 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
 
     private fun commitChar(p: Ptr) {
         val k = p.key ?: return
-        val text = if (p.flick && k.hint != null) k.hint else k.output
+        var text = if (p.flick && k.hint != null) k.hint else k.output
+        if (!p.flick && k === p.downKey && k.type == KeyType.CHAR && k.output.length == 1 && k.output[0].isLetter()) {
+            val alt = borderNeighbour(k, p.downX, p.downY)
+            if (alt != null && charResolver?.invoke(text, alt.output) == true) text = alt.output
+        }
         listener?.onChar(text, p.flick)
+    }
+
+    /** The letter next to [k] if the tap landed close to the border between them, else null. */
+    private fun borderNeighbour(k: Key, x: Float, y: Float): Key? {
+        val l = layout ?: return null
+        var tx = x; var ty = y
+        if (settings?.adaptiveTouch == true) { tx -= touchOffX; ty -= touchOffY }
+        val kw = k.hit.width(); val kh = k.hit.height()
+        if (kw <= 0f || kh <= 0f) return null
+        fun dist(o: Key) = hypot((tx - o.hit.centerX()) / kw, (ty - o.hit.centerY()) / kh)
+        val dk = dist(k)
+        var best: Key? = null; var bd = Float.MAX_VALUE
+        for (o in l.allKeys) {
+            if (o === k || o.type != KeyType.CHAR || o.output.length != 1 || !o.output[0].isLetter()) continue
+            val d = dist(o)
+            if (d < bd) { bd = d; best = o }
+        }
+        // within about a fifth of a key of the border
+        return if (best != null && bd - dk < 0.22f) best else null
     }
 
     private fun onLongPress(p: Ptr) {

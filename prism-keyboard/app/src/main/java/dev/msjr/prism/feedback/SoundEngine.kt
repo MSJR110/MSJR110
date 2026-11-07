@@ -53,7 +53,7 @@ class SoundEngine(private val ctx: Context) {
                 for (kind in Kind.values()) {
                     val arr = IntArray(3)
                     for (v in 0 until 3) {
-                        val f = File(dir, "v1_${myPack}_${kind.name}_$v.wav")
+                        val f = File(dir, "v2_${myPack}_${kind.name}_$v.wav")
                         if (!f.exists() || f.length() < 100) writeWav(f, synth(myPack, kind, v))
                         arr[v] = p.load(f.absolutePath, 1)
                     }
@@ -106,6 +106,7 @@ class SoundEngine(private val ctx: Context) {
         val rnd = Random(pack.hashCode() * 31 + kind.ordinal * 7 + variant)
         val detune = 1f + (variant - 1) * 0.035f
         return when (pack) {
+            "click" -> click(kind, detune, rnd)
             "glass" -> glass(kind, detune, rnd)
             "mech" -> mech(kind, detune, rnd)
             else -> soft(kind, detune, rnd)
@@ -127,6 +128,24 @@ class SoundEngine(private val ctx: Context) {
         addSine(out, f2 * dt, tau2, 0.38f)
         addNoise(out, rnd, fn * dt, 1600f, 0.0009f, 0.9f)
         return finish(out, 0.0003f)
+    }
+
+    /**
+     * Short, dry, crisp click like a phone's built-in keyboard: a very fast bright tick with a tiny
+     * body. Delete sounds a little lower, space/enter a little deeper.
+     */
+    private fun click(kind: Kind, dt: Float, rnd: Random): FloatArray {
+        val n = (sr * 0.035).toInt()
+        val out = FloatArray(n)
+        val (tick, body, low) = when (kind) {
+            Kind.KEY -> Triple(3400f, 1750f, 640f)
+            Kind.DELETE -> Triple(2800f, 1450f, 540f)
+            Kind.MOD -> Triple(2300f, 1150f, 400f)
+        }
+        addNoise(out, rnd, tick * dt, 2600f, 0.00045f, 1.0f)
+        addSine(out, body * dt, 0.0022f, 0.42f)
+        addSine(out, low * dt, if (kind == Kind.MOD) 0.0050f else 0.0035f, if (kind == Kind.MOD) 0.30f else 0.18f)
+        return finish(out, 0.0001f)
     }
 
     /** Crystalline "tink" with inharmonic partials. */

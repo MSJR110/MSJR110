@@ -39,12 +39,12 @@ class Haptics(ctx: Context) {
             keyEffect = null; modEffect = null; tickEffect = null; heavyEffect = null
             return
         }
-        val light = strength < 0.4f
-        keyEffect = build(VibrationEffect.Composition.PRIMITIVE_CLICK, 0.35f + 0.65f * strength, 6 + (strength * 16).toInt(),
-            if (light) VibrationEffect.EFFECT_TICK else VibrationEffect.EFFECT_CLICK)
-        modEffect = build(VibrationEffect.Composition.PRIMITIVE_CLICK, 0.45f + 0.55f * strength, 8 + (strength * 18).toInt(),
-            VibrationEffect.EFFECT_CLICK)
-        tickEffect = build(VibrationEffect.Composition.PRIMITIVE_TICK, 0.25f + 0.55f * strength, 4 + (strength * 6).toInt(),
+        // iPhone-like: every key gets the same short, light, crisp tap (a "tick", never a buzz)
+        val strong = strength > 0.8f
+        keyEffect = build(VibrationEffect.Composition.PRIMITIVE_TICK, 0.5f + 0.5f * strength, 4 + (strength * 6).toInt(),
+            if (strong) VibrationEffect.EFFECT_CLICK else VibrationEffect.EFFECT_TICK)
+        modEffect = keyEffect
+        tickEffect = build(VibrationEffect.Composition.PRIMITIVE_TICK, 0.25f + 0.35f * strength, 3 + (strength * 4).toInt(),
             VibrationEffect.EFFECT_TICK)
         heavyEffect = build(VibrationEffect.Composition.PRIMITIVE_THUD, 0.4f + 0.6f * strength, 14 + (strength * 20).toInt(),
             VibrationEffect.EFFECT_HEAVY_CLICK)

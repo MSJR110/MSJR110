@@ -155,10 +155,10 @@ class SettingsActivity : Activity() {
         card("حس و صدا") { c ->
             c.addView(slider("قدرت لرزش", Prefs.HAPTIC, 55, 0, 100, zeroLabel = "خاموش"))
             c.addView(label("صدای کلیدها"))
-            c.addView(chips(Prefs.SOUND, listOf("off" to "خاموش", "soft" to "نرم", "glass" to "شیشه‌ای", "mech" to "مکانیکی", "system" to "سیستم"), "soft"))
+            c.addView(chips(Prefs.SOUND, listOf("off" to "خاموش", "click" to "کلیک", "soft" to "نرم", "glass" to "شیشه‌ای", "mech" to "مکانیکی", "system" to "سیستم"), "click"))
             c.addView(slider("بلندی صدا", Prefs.SOUND_VOLUME, 55, 0, 100))
             c.addView(toggle("بی‌صدا با حالت سکوت گوشی", "وقتی گوشی روی سایلنت یا ویبره‌ست صدا نده", Prefs.SOUND_RESPECT_SILENT, true))
-            c.addView(slider("مکث نگه‌داشتن کلید", Prefs.LONG_PRESS_MS, 320, 180, 650, suffix = " ms"))
+            c.addView(slider("مکث نگه‌داشتن کلید", Prefs.LONG_PRESS_MS, 400, 180, 650, suffix = " ms"))
             c.addView(slider("سرعت ترک‌پد اسپیس", Prefs.TRACKPAD_SPEED, 100, 50, 200, suffix = "٪"))
             c.addView(toggle("کشیدن روی پاک‌کن", "انگشت رو از ⌫ به چپ بکش تا کلمه‌ها پاک بشن", Prefs.SWIPE_DELETE, true))
             c.addView(toggle("لمس هوشمند", "کیبورد یاد می‌گیره انگشتت دقیقاً کجا می‌خوره", Prefs.ADAPTIVE_TOUCH, true))

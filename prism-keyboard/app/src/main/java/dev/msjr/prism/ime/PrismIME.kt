@@ -154,6 +154,7 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
         }
         val v = KeyboardView(this, glass)
         v.listener = this
+        v.charResolver = { primary, alt -> preferNeighbour(primary, alt) }
         v.clipboardStore = clipStore
         v.setTouchModel(Prefs.get(this).getFloat(Prefs.TOUCH_OFFSET_X, 0f), Prefs.get(this).getFloat(Prefs.TOUCH_OFFSET_Y, 0f))
         v.onTouchModelChanged = { x, y ->
@@ -530,6 +531,18 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
             lastSpaceAt = now
     }
 
+    /**
+     * A tap right on the border of two letters: keep what was hit unless it can't continue any
+     * word while the neighbour clearly can ("سلا" + border of م/ن → "سلام").
+     */
+    private fun preferNeighbour(primary: String, alt: String): Boolean {
+        if (!allowSuggestions || page != Page.LETTERS || midWord || word.isEmpty()) return false
+        val w = word.toString()
+        val l = wordLang(w + primary)
+        if (engine.prefixStrength(w + primary, l) > 0) return false
+        return engine.prefixStrength(w + alt, l) >= 40
+    }
+
     private fun applyLateCorrection(w: String, r: SuggestionResult) {
         val c = ic ?: return
         val ac = r.autoCorrect ?: return
@@ -581,6 +594,8 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
                 commit(orig)
                 c.endBatchEdit()
                 rejected += orig.lowercase()
+                // you meant it: remember the word so it's never "corrected" again
+                if (!privateField && settings.learn) engine.learn(wordLang(orig), orig, null)
                 word.setLength(0); word.append(orig)
                 updateSuggestions()
                 return

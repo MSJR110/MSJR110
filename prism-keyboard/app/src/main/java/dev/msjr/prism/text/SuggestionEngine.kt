@@ -58,6 +58,9 @@ class SuggestionEngine(private val ctx: Context) {
 
     fun user(lang: String) = if (lang == "fa") userFa else userEn
 
+    /** How strongly [prefix] starts a real word (0 = no known word starts like this). Fast; main-thread safe. */
+    fun prefixStrength(prefix: String, lang: String): Int = core.prefixStrength(prefix, lang)
+
     fun learn(lang: String, word: String, prev: String?) {
         worker.post { user(lang).learn(word, prev) }
     }
@@ -100,6 +103,22 @@ class SuggestionCore(val userFa: UserDictionary, val userEn: UserDictionary) {
 
     fun user(lang: String) = if (lang == "fa") userFa else userEn
 
+    fun prefixStrength(prefix: String, lang: String): Int {
+        val q = key(prefix, lang)
+        if (q.isEmpty()) return 255
+        if (user(lang).hasPrefix(q)) return 255
+        val dict = (if (lang == "fa") dictFa else dictEn) ?: return 255 // not loaded yet: don't interfere
+        var i = dict.lowerBound(q)
+        var best = 0
+        var n = 0
+        while (i < dict.size && n < 400) {
+            if (!dict.keys[i].startsWith(q)) break
+            if (dict.freqs[i] > best) best = dict.freqs[i]
+            i++; n++
+        }
+        return best
+    }
+
     // ------------------------------------------------------------------ core
 
     private fun key(w: String, lang: String) = if (lang == "fa") TextTools.normalizeFa(w) else w.lowercase()
@@ -138,7 +157,8 @@ class SuggestionCore(val userFa: UserDictionary, val userEn: UserDictionary) {
         val typedFreq = if (dict != null && dictIdx >= 0) dict.freqs[dictIdx] else 0
         // rare dictionary entries (often typos in the source corpus) are only "weakly" valid
         val strongValid = typedFreq >= 40 || userCount >= 2 || q.length == 1
-        val typedValid = strongValid || dictIdx >= 0
+        // anything you've typed yourself before counts as a real word
+        val typedValid = strongValid || dictIdx >= 0 || userCount >= 1
 
         fun boost(k: String): Float {
             var b = 0f
@@ -240,7 +260,9 @@ class SuggestionCore(val userFa: UserDictionary, val userEn: UserDictionary) {
         var auto: String? = null
         val bc = bestCorr
         val weakTyped = typedValid && !strongValid
-        val allowAuto = !typedValid || (weakTyped && bestCorrFreq >= typedFreq + 80)
+        val allowAuto = userCount == 0 && (!typedValid || (weakTyped && bestCorrFreq >= typedFreq + 80)) &&
+            // Persian: only fix toward common words, never very short ones
+            (lang != "fa" || (bestCorrFreq >= 50 && q.length >= 3))
         val autoLimit = if (lang == "fa") when {
             // Persian has many short real words and colloquial spellings: only fix clear slips
             q.length <= 3 -> 0.5f

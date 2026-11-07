@@ -48,6 +48,7 @@ class UserDictionary(private val dir: File, private val lang: String) {
         if (word.isEmpty() || word.length > 40) return
         val k = norm(word)
         if (k.isEmpty()) return
+        if (words[k] == null) prefixCache.clear()
         words[k] = minOf((words[k] ?: 0) + 1, 100000)
         // keep the capitalisation the user actually uses for proper nouns, and the half-space spelling
         if (betterDisplay(display[k], word) || (lang != "fa" && word != k)) display[k] = word
@@ -71,6 +72,18 @@ class UserDictionary(private val dir: File, private val lang: String) {
     }
 
     @Synchronized fun count(key: String): Int = words[key] ?: 0
+
+    /** Have you typed any word starting with [prefix]? (Cached per prefix so taps stay fast.) */
+    @Synchronized
+    fun hasPrefix(prefix: String): Boolean {
+        prefixCache[prefix]?.let { return it }
+        var found = false
+        for (k in words.keys) if (k.startsWith(prefix)) { found = true; break }
+        if (prefixCache.size > 512) prefixCache.clear()
+        prefixCache[prefix] = found
+        return found
+    }
+    private val prefixCache = HashMap<String, Boolean>()
     @Synchronized fun displayOf(key: String): String = display[key] ?: key
     @Synchronized fun bigram(prev: String, key: String): Int = bigrams[prev]?.get(key) ?: 0
 
