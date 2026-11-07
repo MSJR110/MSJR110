@@ -355,6 +355,8 @@ class SuggestionCore(val userFa: UserDictionary, val userEn: UserDictionary) {
             var x = (layout.units - total) / 2f + row.indent
             for (k in row.keys) {
                 if (k.label.length == 1) out[k.label[0]] = PointF(x + k.width / 2f, r.toFloat())
+                // letters that live on a key's long-press (ض on ص, غ on ع…) sit on that same key
+                k.hint?.let { h -> if (h.length == 1 && h[0].isLetter()) out.putIfAbsent(h[0], PointF(x + k.width / 2f, r.toFloat())) }
                 x += k.width
             }
         }

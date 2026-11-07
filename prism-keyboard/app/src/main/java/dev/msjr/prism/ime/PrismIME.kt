@@ -269,13 +269,13 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
     private fun rebuildLayout() {
         val v = view ?: return
         val l = when (page) {
-            Page.LETTERS -> Layouts.letters(lang, fieldKind, settings.numberRow, settings.persianDigits)
+            Page.LETTERS -> Layouts.letters(lang, fieldKind, settings.numberRow, settings.persianDigits, faShift = lang == "fa" && shift != 0)
             Page.SYMBOLS -> Layouts.symbols(lang, fieldKind, settings.persianDigits, false)
             Page.SYMBOLS2 -> Layouts.symbols(lang, fieldKind, settings.persianDigits, true)
             Page.NUMPAD -> Layouts.numpad(fieldKind == FieldKind.PHONE, lang == "fa" && settings.persianDigits && fieldKind != FieldKind.PHONE)
         }
         v.setLayout(l)
-        v.setShift(if (lang == "en" && page == Page.LETTERS) shift else 0)
+        v.setShift(if (page == Page.LETTERS) shift else 0)
         v.setLangLabel(if (lang == "fa") "FA" else "EN")
     }
 
@@ -387,8 +387,11 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
     }
 
     private fun setShiftState(s: Int) {
+        val layerChanged = lang == "fa" && page == Page.LETTERS && (shift != 0) != (s != 0)
         shift = s
-        view?.setShift(if (lang == "en" && page == Page.LETTERS) s else 0)
+        // Persian shift swaps in a second layer of letters (ض غ ظ ژ ذ آ…, diacritics, half-space on the space bar)
+        if (layerChanged) rebuildLayout()
+        else view?.setShift(if (page == Page.LETTERS) s else 0)
     }
 
     // ------------------------------------------------------------------ KeyboardView.Listener
@@ -656,6 +659,7 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
     }
 
     override fun onLang() {
+        shift = 0
         lang = if (lang == "fa") "en" else "fa"
         if (page == Page.NUMPAD) page = Page.LETTERS
         if (fieldKind == FieldKind.TEXT) Prefs.get(this).edit().putString(Prefs.LANG, lang).apply()
@@ -741,6 +745,7 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
             KeyboardView.Toolbar.CLIPBOARD -> { view?.refreshPanel(); view?.setMode(KeyboardView.Mode.CLIPBOARD) }
             KeyboardView.Toolbar.EMOJI -> { view?.setRecentEmoji(recentEmoji()); view?.setMode(KeyboardView.Mode.EMOJI) }
             KeyboardView.Toolbar.CLOSE_PANEL -> view?.setMode(KeyboardView.Mode.KEYS)
+            KeyboardView.Toolbar.HIDE -> requestHideSelf(0)
             KeyboardView.Toolbar.CLEAR_CLIPBOARD -> { clipStore.clearUnpinned(); view?.refreshPanel(); refreshClipChip() }
             KeyboardView.Toolbar.ONE_HAND -> p.edit().putInt(Prefs.ONE_HAND, if (settings.oneHand == 0) 2 else 0).apply()
             KeyboardView.Toolbar.ONE_HAND_SWITCH -> p.edit().putInt(Prefs.ONE_HAND, if (settings.oneHand == 1) 2 else 1).apply()

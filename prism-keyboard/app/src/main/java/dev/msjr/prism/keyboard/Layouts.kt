@@ -20,21 +20,39 @@ object Layouts {
         "y" to "ýÿ", "z" to "žźż", "l" to "ł", "d" to "ð", "g" to "ğ",
     )
 
+    /** Extra long-press characters (the Samsung-style hint, if any, always comes first). */
     private val faPopups = mapOf(
-        "ا" to listOf("آ", "أ", "إ", "ء", "اً"),
-        "ی" to listOf("ئ", "ي", "ى"),
+        "ا" to listOf("أ", "إ", "ء", "اً"),
+        "ی" to listOf("ي", "ى"),
         "ه" to listOf("ۀ", "ة", "هٔ"),
         "و" to listOf("ؤ"),
         "ک" to listOf("ك"),
-        "ز" to listOf("ژ"),
         "ت" to listOf("ة"),
-        "ج" to listOf("چ"),
         "ر" to listOf("ژ"),
         "ل" to listOf("لا"),
+        "گ" to listOf("ٔ"),
         "ق" to listOf("ـ"),
+        "ث" to listOf("ٌ", "ٍ"),
+        "ب" to listOf("ْ"),
     )
 
-    fun letters(lang: String, kind: FieldKind, numberRow: Boolean, persianDigits: Boolean): KeyboardLayout {
+    /**
+     * Samsung Keyboard's Persian layout, left to right as it appears on screen.
+     * Each pair is (letter, small corner hint). The hint is typed by long-press or a flick up,
+     * and becomes the main letter while shift is on.
+     */
+    private val FA_ROWS: List<List<Pair<String, String?>>> = listOf(
+        listOf("ص" to "ض", "ث" to "ً", "ق" to null, "ف" to null, "ع" to "غ",
+            "ه" to null, "خ" to null, "ح" to null, "ج" to null, "چ" to null),
+        listOf("ش" to "َ", "س" to "ُ", "ی" to "ئ", "ب" to "ّ", "ل" to "ِ",
+            "ا" to "آ", "ت" to null, "ن" to null, "م" to null, "پ" to null),
+        listOf("ط" to "ظ", "ز" to "ژ", "ر" to null, "د" to "ذ", "و" to null, "ک" to null, "گ" to "ء"),
+    )
+
+    /** What a few hint-less keys become on the shift layer. */
+    private val faShiftExtra = mapOf("ه" to "ۀ", "ت" to "ة", "و" to "ؤ", "ک" to "ك", "ر" to "ٔ", "ق" to "ٌ", "ف" to "ٍ")
+
+    fun letters(lang: String, kind: FieldKind, numberRow: Boolean, persianDigits: Boolean, faShift: Boolean = false): KeyboardLayout {
         val fa = lang == "fa"
         val rows = ArrayList<Row>()
         val digits = digits(fa && persianDigits)
@@ -53,21 +71,15 @@ object Layouts {
             rows += bottomRow(fa = false, kind = kind, units = 10f, page = Page.LETTERS)
             return KeyboardLayout("en", rows, rtl = false, units = 10f)
         } else {
-            val r1 = listOf("ض", "ص", "ث", "ق", "ف", "غ", "ع", "ه", "خ", "ح", "ج", "چ")
-            val r2 = listOf("ش", "س", "ی", "ب", "ل", "ا", "ت", "ن", "م", "ک", "گ")
-            val r3 = listOf("ظ", "ط", "ز", "ر", "ذ", "د", "پ", "و")
-            rows += Row(r1.mapIndexed { i, s ->
-                faKey(s, if (!numberRow && i < 10) digits[i].toString() else null)
-            })
-            rows += Row(r2.map { faKey(it, null) }, indent = 0.5f)
+            fun row(i: Int) = FA_ROWS[i].map { (s, h) -> if (faShift) faShiftKey(s, h) else faKey(s, h) }
+            rows += Row(row(0))
+            rows += Row(row(1))
             rows += Row(
-                listOf(Key(KeyType.ZWNJ, "نیم‌فاصله", output = "‌", width = 1.75f,
-                    popup = listOf("َ", "ُ", "ِ", "ّ", "ً", "ٔ", "ْ"))) +
-                    r3.map { faKey(it, null) } +
-                    listOf(Key(KeyType.DELETE, "del", width = 2.25f)),
+                listOf(Key(KeyType.SHIFT, "shift", width = 1.5f)) + row(2) +
+                    listOf(Key(KeyType.DELETE, "del", width = 1.5f)),
             )
-            rows += bottomRow(fa = true, kind = kind, units = 12f, page = Page.LETTERS)
-            return KeyboardLayout("fa", rows, rtl = true, units = 12f)
+            rows += bottomRow(fa = true, kind = kind, units = 10f, page = Page.LETTERS, faShift = faShift)
+            return KeyboardLayout("fa", rows, rtl = true, units = 10f)
         }
     }
 
@@ -88,38 +100,47 @@ object Layouts {
         return Key(KeyType.CHAR, s, s, 1f, pop, hint)
     }
 
+    /** Shift layer: the hint (or a related character) becomes the key; the plain letter moves to long-press. */
+    private fun faShiftKey(s: String, hint: String?): Key {
+        val main = hint ?: faShiftExtra[s] ?: return faKey(s, null)
+        // a lone diacritic is drawn on a tatweel so it doesn't float in the air
+        val mark = Character.getType(main[0]) == Character.NON_SPACING_MARK.toInt()
+        return Key(KeyType.CHAR, if (mark) "ـ$main" else main, main, 1f, listOf(s), null)
+    }
+
     // ---------- bottom row ----------
 
-    private fun bottomRow(fa: Boolean, kind: FieldKind, units: Float, page: Page): Row {
+    /**
+     * Samsung-style bottom row: [!#1] [language] [emoji] [ space ] [ enter ].
+     * The emoji key's long-press holds the punctuation. Email/URL fields swap in "@" or "/" and a "." key.
+     * With Persian shift on, space types a half-space (نیم‌فاصله).
+     */
+    private fun bottomRow(fa: Boolean, kind: FieldKind, units: Float, page: Page, faShift: Boolean = false): Row {
         val u = units / 10f
         val keys = ArrayList<Key>()
         val switchLabel = when (page) {
-            Page.LETTERS -> if (fa) "۱۲۳" else "123"
+            Page.LETTERS -> if (fa) "!#۱" else "!#1"
             else -> if (fa) "ابپ" else "ABC"
         }
         val switchType = if (page == Page.LETTERS) KeyType.SYMBOLS else KeyType.LETTERS
-        keys += Key(switchType, switchLabel, width = 1.25f * u)
+        keys += Key(switchType, switchLabel, width = 1.3f * u)
+        keys += Key(KeyType.LANG, "lang", width = 1.25f * u)
 
+        val web = kind == FieldKind.EMAIL || kind == FieldKind.URL
         when (kind) {
             FieldKind.EMAIL -> keys += Key(KeyType.CHAR, "@", width = 1.0f * u)
             FieldKind.URL -> keys += Key(KeyType.CHAR, "/", width = 1.0f * u)
-            else -> keys += Key(KeyType.EMOJI, "emoji", width = 1.0f * u)
+            else -> keys += Key(KeyType.EMOJI, "emoji", width = 1.0f * u, popup = if (fa)
+                listOf(".", "،", "؟", "!", ":", "؛", "«", "»", "-")
+            else listOf(".", ",", "?", "!", "'", "\"", ":", ";", "-"))
         }
-        keys += Key(KeyType.LANG, "lang", width = 1.0f * u)
 
-        val spaceLabel = if (fa) "فاصله" else "space"
-        keys += Key(KeyType.SPACE, spaceLabel, " ", width = 4.0f * u)
+        val spaceW = (if (web) 3.0f else 4.0f) * u
+        keys += if (fa && faShift) Key(KeyType.ZWNJ, "نیم‌فاصله", "\u200C", spaceW)
+        else Key(KeyType.SPACE, if (fa) "فارسی" else "English", " ", spaceW)
 
-        val period = when (kind) {
-            FieldKind.EMAIL, FieldKind.URL -> Key(KeyType.CHAR, ".", ".", 1.0f * u,
-                listOf(".com", ".ir", ".net", ".org", "-", "_"), hint = null)
-            else -> if (fa) Key(KeyType.CHAR, ".", ".", 1.0f * u,
-                listOf("،", "؟", "!", ":", "؛", "«", "»", "-", "…"), hint = "،")
-            else Key(KeyType.CHAR, ".", ".", 1.0f * u,
-                listOf(",", "?", "!", "'", "\"", ":", ";", "-", "…"), hint = ",")
-        }
-        keys += period
-        keys += Key(KeyType.ENTER, "enter", width = 1.75f * u)
+        if (web) keys += Key(KeyType.CHAR, ".", ".", 1.0f * u, listOf(".com", ".ir", ".net", ".org", "-", "_"))
+        keys += Key(KeyType.ENTER, "enter", width = 2.45f * u)
         return Row(keys)
     }
 

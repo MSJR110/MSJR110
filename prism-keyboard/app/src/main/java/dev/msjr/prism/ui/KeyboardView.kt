@@ -65,7 +65,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         fun onKeyFeedback(key: Key?, kind: Int)
     }
 
-    enum class Toolbar { SETTINGS, CLIPBOARD, EMOJI, ONE_HAND, ONE_HAND_SWITCH, ONE_HAND_OFF, CLOSE_PANEL, CLEAR_CLIPBOARD }
+    enum class Toolbar { HIDE, SETTINGS, CLIPBOARD, EMOJI, ONE_HAND, ONE_HAND_SWITCH, ONE_HAND_OFF, CLOSE_PANEL, CLEAR_CLIPBOARD }
     enum class Mode { KEYS, EMOJI, CLIPBOARD }
 
     var listener: Listener? = null
@@ -94,14 +94,14 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
 
     val extraTop = (30 * dp)                     // transparent room for previews over the app
     private var stripH = 46 * dp
-    private var rowPitch = 56 * dp
+    private var rowPitch = 60 * dp
     private var keysH = 0f
     private var bottomInset = 0
     private val padTop = 4 * dp
     private val padBottom = 6 * dp
-    private val gapX = 5.5f * dp
-    private val gapY = 10 * dp
-    private val radius = 11 * dp
+    private val gapX = 6.5f * dp
+    private val gapY = 12 * dp
+    private val radius = 9 * dp
     private val keysArea = RectF()
     private val oneHandArea = RectF()
     private val stripArea = RectF()
@@ -222,7 +222,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         settings = s
         typeface = font; typefaceBold = fontBold
         val landscape = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
-        rowPitch = 56f * dp * (s.heightPct / 100f) * (if (landscape) 0.7f else 1f)
+        rowPitch = 60f * dp * (s.heightPct / 100f) * (if (landscape) 0.7f else 1f)
         stripH = (if (landscape) 38f else 46f) * dp
         showSuggestions = s.suggestions
         requestLayout()
@@ -375,7 +375,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         return when {
             isEnterAccent -> th.accent to 0.62f
             k.type == KeyType.SHIFT && shiftState != 0 -> (if (th.dark) Color.WHITE else Color.WHITE) to (if (th.dark) 0.55f else 0.95f)
-            k.isModifier && k.type != KeyType.ZWNJ -> th.modTint.let { Color.rgb(Color.red(it), Color.green(it), Color.blue(it)) to Color.alpha(it) / 255f }
+            k.isModifier && k.type != KeyType.ZWNJ && k.type != KeyType.EMOJI -> th.modTint.let { Color.rgb(Color.red(it), Color.green(it), Color.blue(it)) to Color.alpha(it) / 255f }
             else -> th.keyTint.let { Color.rgb(Color.red(it), Color.green(it), Color.blue(it)) to Color.alpha(it) / 255f }
         }
     }
@@ -458,8 +458,9 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
                         hintPaint.textSize = 9f * sp
                         canvas.drawText(h, cx, k.rect.bottom - 6 * dp, hintPaint)
                     } else {
-                        hintPaint.textSize = 10f * sp
-                        canvas.drawText(h, k.rect.right - 7 * dp, k.rect.top + 13 * dp, hintPaint)
+                        hintPaint.textSize = 10.5f * sp
+                        val hx = if (l.rtl) k.rect.left + 8 * dp else k.rect.right - 7 * dp
+                        canvas.drawText(h, hx, k.rect.top + 14 * dp, hintPaint)
                     }
                 }
             }
@@ -642,7 +643,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
             val s = 36 * dp
             var x = 8 * dp
             val cy = top + h / 2f
-            val actions = listOf(Toolbar.SETTINGS, Toolbar.CLIPBOARD, Toolbar.EMOJI, Toolbar.ONE_HAND)
+            val actions = listOf(Toolbar.SETTINGS, Toolbar.CLIPBOARD, Toolbar.ONE_HAND)
             val t = th.modTint
             for (a in actions) {
                 val r = RectF(x, cy - s / 2, x + s, cy + s / 2)
@@ -658,9 +659,15 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
                 }
                 x += s + 8 * dp
             }
+            val hide = RectF(w - 8 * dp - s, cy - s / 2, w - 8 * dp, cy + s / 2)
+            toolbarBtns += Toolbar.HIDE to hide
+            iconPaint.color = th.label; iconPaint.alpha = 230; iconPaint.strokeWidth = 2f * dp
+            val hcx = hide.centerX(); val hcy = hide.centerY(); val hs = s * 0.18f
+            canvas.drawLine(hcx - hs, hcy - hs * 0.45f, hcx, hcy + hs * 0.55f, iconPaint)
+            canvas.drawLine(hcx, hcy + hs * 0.55f, hcx + hs, hcy - hs * 0.45f, iconPaint)
             clipChip?.let { chip ->
                 val left = x + 8 * dp
-                val right = w - 8 * dp
+                val right = hide.left - 6 * dp
                 if (right - left > 60 * dp) {
                     stripPaint.typeface = typeface
                     stripPaint.textSize = 13.5f * sp
@@ -1087,7 +1094,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
             KeyType.SHIFT -> listener?.onShiftDown()
             KeyType.SPACE -> ui.postDelayed(p.longPress, lp + 60)
             KeyType.LANG -> ui.postDelayed(p.longPress, 450)
-            KeyType.CHAR, KeyType.ZWNJ -> if (k.popup.isNotEmpty() || k.hint != null) ui.postDelayed(p.longPress, lp)
+            KeyType.CHAR, KeyType.ZWNJ, KeyType.EMOJI -> if (k.popup.isNotEmpty() || k.hint != null) ui.postDelayed(p.longPress, lp)
             else -> {}
         }
         kick()
@@ -1175,7 +1182,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
                             KeyType.ENTER -> listener?.onEnter()
                             KeyType.SYMBOLS, KeyType.SYMBOLS2, KeyType.LETTERS -> listener?.onSwitchPage(k.type)
                             KeyType.LANG -> if (!p.longFired) listener?.onLang()
-                            KeyType.EMOJI -> listener?.onToolbar(Toolbar.EMOJI)
+                            KeyType.EMOJI -> if (!p.longFired) listener?.onToolbar(Toolbar.EMOJI)
                             else -> {}
                         }
                     }
@@ -1224,7 +1231,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         when (k.type) {
             KeyType.SPACE -> startTrackpad(p)
             KeyType.LANG -> { k.pressTarget = 0f; listener?.onLangLongPress() }
-            KeyType.CHAR, KeyType.ZWNJ -> {
+            KeyType.CHAR, KeyType.ZWNJ, KeyType.EMOJI -> {
                 if (p.flick) return
                 val items = popupItems(p)
                 if (items.isEmpty()) return
