@@ -165,6 +165,7 @@ class GlassRenderer(private val ctx: Context) {
             rs.setFloatUniform("tint", Color.red(tint) / 255f, Color.green(tint) / 255f, Color.blue(tint) / 255f, tintAlpha)
             rs.setFloatUniform("press", press)
             rs.setFloatUniform("dark", if (theme.dark) 1f else 0f)
+            rs.setFloatUniform("join", 0f)
             glassPaint.shader = rs
             canvas.drawRect(tmp.left - 2f, tmp.top - 2f, tmp.right + 2f, tmp.bottom + 2f, glassPaint)
             drawn = true
@@ -190,6 +191,59 @@ class GlassRenderer(private val ctx: Context) {
             val h = sw / 2f
             canvas.drawRoundRect(tmp.left + h, tmp.top + h, tmp.right - h, tmp.bottom - h, rad - h, rad - h, rimPaint)
         }
+    }
+
+    private val balloonPath = android.graphics.Path()
+    private val tmp2 = RectF()
+
+    /**
+     * The iPhone key-preview balloon: a big rounded [bubble] melted into the pressed [key] below it,
+     * all one piece of glass.
+     */
+    fun drawBalloon(canvas: Canvas, bubble: RectF, bubbleRadius: Float, key: RectF, keyRadius: Float, tint: Int, tintAlpha: Float) {
+        val melt = min(key.width(), bubble.height()) * 0.42f
+        // soft shadow under the whole balloon so it floats above the keys
+        val dy = 2.2f * density
+        shadowPaint.alpha = (Color.alpha(theme.shadow) * 1.6f).toInt().coerceIn(0, 255)
+        canvas.drawRoundRect(bubble.left, bubble.top + dy, bubble.right, bubble.bottom + dy, bubbleRadius, bubbleRadius, shadowPaint)
+        canvas.drawRoundRect(key.left, key.top + dy, key.right, key.bottom + dy, keyRadius, keyRadius, shadowPaint)
+        shadowPaint.color = theme.shadow
+
+        val rs = runtime
+        if (rs != null && !runtimeBroken && refractionWanted && Build.VERSION.SDK_INT >= 33 && backdropShader != null) try {
+            rs.setFloatUniform("center", bubble.centerX(), bubble.centerY())
+            rs.setFloatUniform("halfSize", bubble.width() / 2f, bubble.height() / 2f)
+            rs.setFloatUniform("radius", min(bubbleRadius, min(bubble.width(), bubble.height()) / 2f))
+            rs.setFloatUniform("center2", key.centerX(), key.centerY())
+            rs.setFloatUniform("halfSize2", key.width() / 2f, key.height() / 2f)
+            rs.setFloatUniform("radius2", min(keyRadius, min(key.width(), key.height()) / 2f))
+            rs.setFloatUniform("join", melt)
+            rs.setFloatUniform("bezel", max(3f, min(bubble.width(), bubble.height()) * 0.22f))
+            rs.setFloatUniform("strength", (5f + 14f * strength) * density)
+            rs.setFloatUniform("px1", density)
+            rs.setFloatUniform("tint", Color.red(tint) / 255f, Color.green(tint) / 255f, Color.blue(tint) / 255f, tintAlpha)
+            rs.setFloatUniform("press", 0.15f)
+            rs.setFloatUniform("dark", if (theme.dark) 1f else 0f)
+            glassPaint.shader = rs
+            val pad = melt + 2f
+            tmp2.set(min(bubble.left, key.left) - pad, bubble.top - 2f, max(bubble.right, key.right) + pad, key.bottom + 2f)
+            canvas.drawRect(tmp2, glassPaint)
+            rs.setFloatUniform("join", 0f)
+            return
+        } catch (t: Throwable) {
+            Log.w(TAG, "balloon shader failed, using frosted fallback", t)
+            runtimeBroken = true
+        }
+        // frosted fallback: bubble + neck + key as one path
+        val a = ((if (theme.dark) 0.16f else 0.62f) + tintAlpha * 0.5f).coerceIn(0f, 1f)
+        fillPaint.shader = null
+        fillPaint.color = Color.argb((a * 255).toInt(), Color.red(tint), Color.green(tint), Color.blue(tint))
+        balloonPath.reset()
+        balloonPath.addRoundRect(bubble, bubbleRadius, bubbleRadius, android.graphics.Path.Direction.CW)
+        balloonPath.addRoundRect(key, keyRadius, keyRadius, android.graphics.Path.Direction.CW)
+        balloonPath.addRect(key.left, bubble.bottom - bubbleRadius, key.right, key.top + keyRadius, android.graphics.Path.Direction.CW)
+        balloonPath.fillType = android.graphics.Path.FillType.WINDING
+        canvas.drawPath(balloonPath, fillPaint)
     }
 
     // ------------------------------------------------------------------ backdrops
@@ -297,17 +351,32 @@ uniform float4 tint;
 uniform float press;
 uniform float dark;
 uniform float px1;
+uniform float2 center2;
+uniform float2 halfSize2;
+uniform float radius2;
+uniform float join;
 
 float sdRoundRect(float2 p, float2 b, float r) {
     float2 q = abs(p) - b + float2(r, r);
     return min(max(q.x, q.y), 0.0) + length(max(q, float2(0.0, 0.0))) - r;
 }
 
+// the shape: one rounded rect, or (join > 0) two melted together like the iPhone key balloon
+float shape(float2 c) {
+    float d = sdRoundRect(c - center, halfSize, radius);
+    if (join > 0.0) {
+        float d2 = sdRoundRect(c - center2, halfSize2, radius2);
+        float h = clamp(0.5 + 0.5 * (d2 - d) / join, 0.0, 1.0);
+        d = mix(d2, d, h) - join * h * (1.0 - h);
+    }
+    return d;
+}
+
 half4 main(float2 coord) {
     float2 p = coord - center;
-    float d = sdRoundRect(p, halfSize, radius);
-    float dx = sdRoundRect(p + float2(1.0, 0.0), halfSize, radius) - sdRoundRect(p - float2(1.0, 0.0), halfSize, radius);
-    float dy = sdRoundRect(p + float2(0.0, 1.0), halfSize, radius) - sdRoundRect(p - float2(0.0, 1.0), halfSize, radius);
+    float d = shape(coord);
+    float dx = shape(coord + float2(1.0, 0.0)) - shape(coord - float2(1.0, 0.0));
+    float dy = shape(coord + float2(0.0, 1.0)) - shape(coord - float2(0.0, 1.0));
     float2 n = float2(dx, dy);
     n = n / max(length(n), 0.0001);
 

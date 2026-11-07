@@ -538,20 +538,19 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         if (settings?.keyPreview == false || k.type != KeyType.CHAR || popupPtr === p) return
         if (layout?.id == "num") return
         val text = shown(if (p.flick && k.hint != null) k.hint else displayLabel(k))
-        val sc = 0.6f + 0.4f * previewScale
-        val w = max(k.rect.width() * 1.45f, 52 * dp) * sc
-        val h = k.rect.height() * 1.25f * sc
+        // iPhone-style balloon: a wide bubble that grows out of the key itself, one piece of glass
+        val w = max(k.rect.width() * 1.55f, 54 * dp)
+        val h = k.rect.height() * 1.12f
         val cx = k.rect.centerX().coerceIn(w / 2f + 2 * dp, width - w / 2f - 2 * dp)
-        val bottom = k.rect.top - 6 * dp
-        var top = bottom - h
-        if (top < 2 * dp) top = 2 * dp
-        tmpRect.set(cx - w / 2f, top, cx + w / 2f, top + h)
-        val bubbleTint = if (th.dark) Color.rgb(70, 72, 90) else Color.WHITE
-        glass.drawGlass(canvas, tmpRect, 16 * dp, 0.3f, bubbleTint, if (th.dark) 0.72f else 0.9f)
+        var bottom = k.rect.top + 1 * dp
+        if (bottom - h < 2 * dp) bottom = 2 * dp + h
+        tmpRect.set(cx - w / 2f, bottom - h, cx + w / 2f, bottom)
+        val bubbleTint = if (th.dark) Color.rgb(104, 106, 122) else Color.WHITE
+        glass.drawBalloon(canvas, tmpRect, 14 * dp, k.rect, radius, bubbleTint, if (th.dark) 0.78f else 0.94f)
         labelPaint.typeface = typeface
-        labelPaint.textSize = (if (text.length > 2) 22f else 34f) * sp * sc
+        labelPaint.textSize = (if (text.length > 2) 22f else 32f) * sp
         labelPaint.color = th.label; labelPaint.alpha = 255
-        drawCentered(canvas, text, tmpRect.centerX(), tmpRect.centerY(), labelPaint)
+        drawCentered(canvas, text, tmpRect.centerX(), tmpRect.centerY() + 1 * dp, labelPaint)
     }
 
     // --- long-press popup
@@ -990,7 +989,22 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
 
     // ------------------------------------------------------------------ touch
 
-    private enum class PMode { KEY, TRACKPAD, DELETE_SWIPE, STRIP, PANEL_SCROLL, PANEL_TAP, PANEL_KEY, ONE_HAND, NONE }
+    private enum class PMode { KEY, SLIDE, TRACKPAD, DELETE_SWIPE, STRIP, PANEL_SCROLL, PANEL_TAP, PANEL_KEY, ONE_HAND, NONE }
+
+    /** Follow a finger that slid off !#1 / shift: light up the character under it. */
+    private fun slideTo(p: Ptr, x: Float, y: Float) {
+        val nk = keyAt(x, y)?.takeIf { it.type == KeyType.CHAR }
+        if (nk === p.key) return
+        p.key?.pressTarget = 0f
+        p.key = nk
+        p.previewKey = nk
+        if (nk != null) {
+            nk.pressTarget = 1f
+            listener?.onKeyFeedback(null, FEEDBACK_TICK)
+        }
+        invalidate()
+        kick()
+    }
 
     private inner class Ptr(val id: Int) {
         var key: Key? = null
@@ -1012,6 +1026,8 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         var swipeWords = 0
         var stripIndex = -1
         var toolbar: Toolbar? = null
+        /** for [PMode.SLIDE]: the key the slide started on */
+        var slideFrom: KeyType? = null
         val longPress = Runnable { onLongPress(this) }
         val repeater = Runnable { onRepeat(this) }
     }
@@ -1188,6 +1204,24 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
                             startTrackpad(p)
                         }
                     }
+                    KeyType.SYMBOLS, KeyType.SYMBOLS2, KeyType.LETTERS, KeyType.SHIFT -> {
+                        // iPhone trick: press !#1 (or shift), slide onto a character and let go —
+                        // it's typed and you're back where you were, in one motion
+                        val out = max(max(k.hit.left - x, x - k.hit.right) / k.rect.width(),
+                            max(k.hit.top - y, y - k.hit.bottom) / k.rect.height())
+                        if (out > 0.3f) {
+                            val target = keyAt(x, y)
+                            if (target != null && target.type == KeyType.CHAR) {
+                                ui.removeCallbacks(p.longPress)
+                                k.pressTarget = 0f
+                                p.slideFrom = k.type
+                                p.mode = PMode.SLIDE
+                                p.key = null
+                                if (k.type != KeyType.SHIFT) listener?.onSwitchPage(k.type)
+                                slideTo(p, x, y)
+                            }
+                        }
+                    }
                     KeyType.DELETE -> {
                         if (settings?.swipeDelete != false && p.downX - x > 26 * dp) {
                             ui.removeCallbacks(p.repeater)
@@ -1226,6 +1260,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
                     else -> {}
                 }
             }
+            PMode.SLIDE -> slideTo(p, x, y)
             PMode.TRACKPAD -> trackpadMove(p, dx, dy)
             PMode.DELETE_SWIPE -> updateDeleteSwipe(p)
             PMode.PANEL_TAP, PMode.PANEL_SCROLL -> panelMove(p, dx, dy)
@@ -1263,6 +1298,22 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
                     }
                 }
                 p.previewKey = null
+            }
+            PMode.SLIDE -> {
+                val k = p.key
+                p.previewKey = null
+                if (k != null) {
+                    k.pressTarget = 0f
+                    if (k.type == KeyType.CHAR) {
+                        listener?.onChar(k.output, false)
+                        // back where the slide started (shift turns itself off after one letter)
+                        when (p.slideFrom) {
+                            KeyType.SYMBOLS -> listener?.onSwitchPage(KeyType.LETTERS)
+                            KeyType.SYMBOLS2 -> listener?.onSwitchPage(KeyType.SYMBOLS)
+                            else -> {}
+                        }
+                    }
+                }
             }
             PMode.TRACKPAD -> {
                 p.key?.pressTarget = 0f

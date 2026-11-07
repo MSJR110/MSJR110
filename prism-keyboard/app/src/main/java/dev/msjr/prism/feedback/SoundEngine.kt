@@ -84,9 +84,11 @@ class SoundEngine(private val ctx: Context) {
                     val rate = p.sampleRate
                     val made = HashMap<Kind, Array<FloatArray>>()
                     for (k in Kind.values()) made[k] = Array(3) { v -> synth(myPack, k, v, rate) }
-                    synchronized(this) {
-                        if (gen == generation) { clips = made; player = p; p.warmUp() } else p.release()
+                    val current = synchronized(this) {
+                        if (gen == generation) { clips = made; player = p; true } else { p.release(); false }
                     }
+                    // the keyboard is usually already open by now (warmUp() skips silent mode)
+                    if (current) warmUp()
                 } else {
                     loadSoundPool(myPack, gen)
                 }
