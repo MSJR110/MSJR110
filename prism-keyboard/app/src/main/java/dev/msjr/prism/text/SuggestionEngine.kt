@@ -4,9 +4,6 @@ import android.content.Context
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
-import android.graphics.PointF
-import dev.msjr.prism.keyboard.FieldKind
-import dev.msjr.prism.keyboard.Layouts
 import kotlin.math.exp
 import kotlin.math.ln
 import kotlin.math.max
@@ -54,6 +51,11 @@ class SuggestionEngine(private val ctx: Context) {
             userFa.load(); userEn.load()
             try { core.dictFa = Dictionary.load(ctx, "dict/fa.dict", persian = true) } catch (_: Throwable) { }
             try { core.dictEn = Dictionary.load(ctx, "dict/en.dict") } catch (_: Throwable) { }
+            // word-pair models: only usable with the exact word list they were built for
+            core.dictFa?.let { d -> try { core.lmFa = ctx.assets.open("dict/fa.lm").use { LanguageModel.load(it, d) } } catch (_: Throwable) { } }
+            core.dictEn?.let { d -> try { core.lmEn = ctx.assets.open("dict/en.lm").use { LanguageModel.load(it, d) } } catch (_: Throwable) { } }
+            try { core.emojiFa = ctx.assets.open("emoji/fa.tsv").use { EmojiIndex.load(it, persian = true) } } catch (_: Throwable) { }
+            try { core.emojiEn = ctx.assets.open("emoji/en.tsv").use { EmojiIndex.load(it, persian = false) } } catch (_: Throwable) { }
         }
     }
 
@@ -62,8 +64,14 @@ class SuggestionEngine(private val ctx: Context) {
     /** How strongly [prefix] starts a real word (0 = no known word starts like this). Fast; main-thread safe. */
     fun prefixStrength(prefix: String, lang: String): Int = core.prefixStrength(prefix, lang)
 
-    /** See [SuggestionCore.prefixLogWeight]. Fast; main-thread safe. */
-    fun prefixLogWeight(prefix: String, prev: String?, lang: String): Float = core.prefixLogWeight(prefix, prev, lang)
+    /** Emoji matching [query] (Persian or English by its letters); empty until the index has loaded. */
+    fun searchEmoji(query: String, limit: Int = 60): List<String> {
+        val index = (if (TextTools.isPersianText(query)) core.emojiFa else core.emojiEn) ?: return emptyList()
+        return index.search(query, limit)
+    }
+
+    /** See [SuggestionCore.letterWeights]. Fast; main-thread safe. */
+    fun letterWeights(word: String, prev: String?, cands: List<String>): FloatArray? = core.letterWeights(word, prev, cands)
 
     fun learn(lang: String, word: String, prev: String?) {
         worker.post { user(lang).learn(word, prev) }
@@ -91,11 +99,11 @@ class SuggestionEngine(private val ctx: Context) {
         }
     }
 
-    fun request(query: String, prev: String?, lang: String, callback: (SuggestionResult) -> Unit) {
+    fun request(query: String, prev: String?, lang: String, capitalize: Boolean = false, callback: (SuggestionResult) -> Unit) {
         val my = ++seq
         worker.post {
             if (my != seq) return@post
-            val res = try { core.compute(query, prev, lang) } catch (_: Throwable) { SuggestionResult.EMPTY }
+            val res = try { core.compute(query, prev, lang, capitalize) } catch (_: Throwable) { SuggestionResult.EMPTY }
             main.post { if (my == seq) callback(res) }
         }
     }
@@ -105,10 +113,27 @@ class SuggestionEngine(private val ctx: Context) {
 class SuggestionCore(val userFa: UserDictionary, val userEn: UserDictionary) {
     @Volatile var dictFa: Dictionary? = null
     @Volatile var dictEn: Dictionary? = null
+    @Volatile var lmFa: LanguageModel? = null
+    @Volatile var lmEn: LanguageModel? = null
+    @Volatile var emojiFa: EmojiIndex? = null
+    @Volatile var emojiEn: EmojiIndex? = null
     @Volatile var shortcuts: Map<String, String> = emptyMap()
-    private val proximity: Map<String, Map<Char, PointF>> = mapOf("fa" to centers("fa"), "en" to centers("en"))
+    private val proximity: Map<String, Map<Char, Pt>> = mapOf("fa" to KeyGeometry.centers("fa"), "en" to KeyGeometry.centers("en"))
 
     fun user(lang: String) = if (lang == "fa") userFa else userEn
+
+    /**
+     * For the letters a tap could have meant: how well each continues the word being typed
+     * ("سلا" + م → "سلام" beats "سلا" + ن), as log weights. Null = no opinion, type what was hit.
+     */
+    fun letterWeights(word: String, prev: String?, cands: List<String>): FloatArray? {
+        if (cands.isEmpty() || word.length > 24) return null
+        val l = if (TextTools.isPersianText(word + cands[0])) "fa" else "en"
+        val out = FloatArray(cands.size) { prefixLogWeight(word + cands[it], prev, l) }
+        // the first letter of a word says less about what's coming: let the finger count for more
+        if (word.isEmpty()) for (i in out.indices) out[i] *= 0.6f
+        return out
+    }
 
     fun prefixStrength(prefix: String, lang: String): Int {
         val q = key(prefix, lang)
@@ -143,6 +168,19 @@ class SuggestionCore(val userFa: UserDictionary, val userEn: UserDictionary) {
             sum += exp(dict.freqs[i] / 28.0)
             i++; n++
         }
+        // after this word, words usually come in a different mix: each one weighs P(w | prev) / P(w) more
+        val lm = lm(lang)
+        val ctx = if (lm != null) context(lm, dict, prevRaw, lang) else -1
+        if (lm != null && ctx >= 0 && sum > 0.0) {
+            val b0 = lm.lnBackoff(ctx) * LM_TAP
+            sum *= exp(b0.toDouble())
+            for (f in 0 until lm.followerCount(ctx)) {
+                val id = lm.followerId(ctx, f)
+                if (!dict.keys[id].startsWith(q)) continue
+                val b = ((lm.followerLnP(ctx, f) - lm.lnUni(id)) * LM_TAP).toDouble()
+                sum += exp(dict.freqs[id] / 28.0) * (exp(b) - exp(b0.toDouble()))
+            }
+        }
         val user = user(lang)
         val use = user.prefixUse(q)
         // your own words count more the more you use them: typed once (maybe a typo) is like a
@@ -160,28 +198,99 @@ class SuggestionCore(val userFa: UserDictionary, val userEn: UserDictionary) {
 
     private fun key(w: String, lang: String) = if (lang == "fa") TextTools.normalizeFa(w) else w.lowercase()
 
-    fun compute(query: String, prevRaw: String?, lang: String): SuggestionResult {
+    private fun lm(lang: String) = if (lang == "fa") lmFa else lmEn
+
+    /** The model's context id for the word before: sentence start when there is none, -1 if unknown. */
+    private fun context(lm: LanguageModel, dict: Dictionary, prevRaw: String?, lang: String): Int =
+        if (prevRaw.isNullOrEmpty()) lm.bos else dict.indexOf(key(prevRaw, lang))
+
+    /**
+     * Next-word predictions (nothing typed yet): what usually follows [prev] in general, mixed with
+     * what *you* usually write after it.
+     */
+    private fun predict(prev: String?, prevRaw: String?, lang: String, dict: Dictionary?, user: UserDictionary, capitalize: Boolean): SuggestionResult {
+        val lm = lm(lang)
+        val ctx = if (lm != null && dict != null) context(lm, dict, prevRaw, lang) else -1
+        val scores = HashMap<String, Float>()
+        val shown = HashMap<String, String>()
+        if (lm != null && dict != null && ctx >= 0) {
+            for (f in 0 until min(lm.followerCount(ctx), 16)) {
+                val id = lm.followerId(ctx, f)
+                val k = dict.keys[id]
+                scores[k] = lm.followerLnP(ctx, f) + USER_PREDICT * ln(1f + user.count(k)) * 0.25f
+                shown[k] = dict.words[id]
+            }
+        }
+        if (!prev.isNullOrEmpty()) {
+            for ((w, c) in user.followers(prev, 6)) {
+                val k = key(w, lang)
+                // what you write after this word beats the general model quickly
+                val base = scores[k] ?: run {
+                    val id = dict?.indexOf(k) ?: -1
+                    if (lm != null && ctx >= 0 && id >= 0) lm.lnBackoff(ctx) + lm.lnUni(id) else -9f
+                }
+                scores[k] = base + USER_PREDICT * ln(1f + c)
+                // a learned word typed without its half-space is shown spelled properly ("نمیشد" → "نمی‌شد")
+                var s = w
+                if (dict != null && lang == "fa" && w.indexOf(TextTools.ZWNJ) < 0) {
+                    val di = dict.indexOf(k)
+                    if (di >= 0 && dict.words[di].replace(TextTools.ZWNJ.toString(), "") == w) s = dict.words[di]
+                }
+                shown.putIfAbsent(k, s)
+            }
+        }
+        val emoji = emojiFor(prevRaw)
+        if (scores.isEmpty() && emoji == null) return SuggestionResult.EMPTY
+        val best = scores.entries.sortedByDescending { it.value }.take(3)
+        val slots = arrayOfNulls<Suggestion>(3)
+        val order = intArrayOf(1, 0, 2)
+        best.forEachIndexed { i, e ->
+            var text = shown[e.key] ?: e.key
+            if (capitalize && lang == "en") text = text.replaceFirstChar { it.uppercaseChar() }
+            slots[order[i]] = Suggestion(text, Suggestion.Kind.PREDICTION, e.value)
+        }
+        // "پیتزا " → 🍕 in the strip (in place of the third guess)
+        if (emoji != null) slots[if (slots[1] == null) 1 else 2] = Suggestion(emoji, Suggestion.Kind.EMOJI, 0f)
+        return SuggestionResult("", slots, null, true)
+    }
+
+    /**
+     * For a Persian word missing from the word list: how common its stem is, if it is a known word plus
+     * a standard ending — ezafe after a silent h ("مسئله" + ی), a possessive ("کتاب" + ش, "خونه" + مون),
+     * or the spoken form that drops the h ("ادامه" → "ادامش"). 0 if it isn't.
+     */
+    private fun stemFreq(q: String, dict: Dictionary): Int {
+        var best = 0
+        for (suf in FA_ENDINGS) {
+            if (q.length < suf.length + 2 || !q.endsWith(suf)) continue
+            val stem = q.substring(0, q.length - suf.length)
+            // a bare "ی" is also a typo magnet: only accept it as ezafe after a silent h
+            if (suf == "ی" && !stem.endsWith("ه")) continue
+            best = max(best, dict.freqOf(stem))
+            if (suf != "ی" && suf != "ای") best = max(best, dict.freqOf(stem + "ه"))
+        }
+        return best
+    }
+
+    /** An emoji for the word just typed ("قلب" → ❤️), in its own language; not for everyday words. */
+    private fun emojiFor(word: String?): String? {
+        if (word.isNullOrEmpty()) return null
+        val fa = TextTools.isPersianText(word)
+        val index = (if (fa) emojiFa else emojiEn) ?: return null
+        val dict = if (fa) dictFa else dictEn
+        if (dict != null && dict.freqOf(key(word, if (fa) "fa" else "en")) >= EMOJI_MAX_WORD_FREQ) return null
+        return index.forWord(word)
+    }
+
+    /** [capitalize]: the next word starts a sentence (only used for predictions, before any letter). */
+    fun compute(query: String, prevRaw: String?, lang: String, capitalize: Boolean = false): SuggestionResult {
         val dict = if (lang == "fa") dictFa else dictEn
         val user = user(lang)
         val prev = prevRaw?.let { key(it, lang) }
+        val lm = lm(lang)
+        val ctx = if (lm != null && dict != null) context(lm, dict, prevRaw, lang) else -1
 
-        if (query.isEmpty()) {
-            if (prev.isNullOrEmpty()) return SuggestionResult.EMPTY
-            val f = user.followers(prev, 3)
-            if (f.isEmpty()) return SuggestionResult.EMPTY
-            val slots = arrayOfNulls<Suggestion>(3)
-            val order = intArrayOf(1, 0, 2)
-            f.forEachIndexed { i, (w, c) ->
-                // a learned word typed without its half-space is shown spelled properly ("نمیشد" → "نمی‌شد")
-                var shown = w
-                if (dict != null && lang == "fa" && w.indexOf(TextTools.ZWNJ) < 0) {
-                    val di = dict.indexOf(key(w, lang))
-                    if (di >= 0 && dict.words[di].replace(TextTools.ZWNJ.toString(), "") == w) shown = dict.words[di]
-                }
-                slots[order[i]] = Suggestion(shown, Suggestion.Kind.PREDICTION, c.toFloat())
-            }
-            return SuggestionResult("", slots, null, true)
-        }
+        if (query.isEmpty()) return predict(prev, prevRaw, lang, dict, user, capitalize)
 
         val q = key(query, lang)
         val cands = HashMap<String, Suggestion>()
@@ -201,11 +310,19 @@ class SuggestionCore(val userFa: UserDictionary, val userEn: UserDictionary) {
         val dictIdx = dict?.indexOf(q) ?: -1
         val typedFreq = if (dict != null && dictIdx >= 0) dict.freqs[dictIdx] else 0
         // rare dictionary entries (often typos in the source corpus) are only "weakly" valid
-        val strongValid = typedFreq >= 40 || userCount >= 2 || q.length == 1
+        val strongValid = typedFreq >= 40 || userCount >= 2 || q.length == 1 ||
+            // a common Persian word plus an ending ("مسئله‌ی", "خونه‌ش", "ادامش") is a real word too
+            (lang == "fa" && dictIdx < 0 && dict != null && FA_STEM_MIN_FREQ < 256 && stemFreq(q, dict) >= FA_STEM_MIN_FREQ)
         // anything you've typed yourself before counts as a real word
         val typedValid = strongValid || dictIdx >= 0 || userCount >= 1
 
-        fun boost(k: String): Float {
+        /** How much likelier the word is right after the previous one (dictionary index; score units). */
+        fun context(idx: Int): Float {
+            if (lm == null || ctx < 0 || idx < 0) return 0f
+            return LM_RANK * lm.bonus(ctx, idx).coerceIn(-LM_CLAMP_DOWN, LM_CLAMP_UP)
+        }
+
+        fun boost(k: String, idx: Int = -2): Float {
             var b = 0f
             val uc = user.count(k)
             if (uc > 0) b += min(0.45f, (ln(1.0 + uc) * 0.12).toFloat())
@@ -213,11 +330,12 @@ class SuggestionCore(val userFa: UserDictionary, val userEn: UserDictionary) {
                 val bg = user.bigram(prev, k)
                 if (bg > 0) b += min(0.5f, 0.18f + bg * 0.08f)
             }
+            if (lm != null && ctx >= 0) b += context(if (idx == -2) (dict?.indexOf(k) ?: -1) else idx)
             return b
         }
 
         // exact
-        if (dict != null && dictIdx >= 0) offer(dict.words[dictIdx], Suggestion.Kind.WORD, dict.freqs[dictIdx] / 255f + boost(q) + (if (strongValid) 0.35f else 0f))
+        if (dict != null && dictIdx >= 0) offer(dict.words[dictIdx], Suggestion.Kind.WORD, dict.freqs[dictIdx] / 255f + boost(q, dictIdx) + (if (strongValid) 0.35f else 0f))
         if (userCount > 0) offer(user.displayOf(q), Suggestion.Kind.WORD, 0.6f + boost(q))
 
         // completions
@@ -228,10 +346,20 @@ class SuggestionCore(val userFa: UserDictionary, val userEn: UserDictionary) {
                 val k = dict.keys[i]
                 if (!k.startsWith(q)) break
                 if (k.length > q.length) {
-                    val s = dict.freqs[i] / 255f + boost(k) - 0.035f * (k.length - q.length) - 0.06f
+                    val s = dict.freqs[i] / 255f + boost(k, i) - 0.035f * (k.length - q.length) - 0.06f
                     offer(dict.words[i], Suggestion.Kind.WORD, s)
                 }
                 i++; scanned++
+            }
+            // words that usually come next, even if the scan above stopped before reaching them
+            if (lm != null && ctx >= 0) {
+                for (f in 0 until lm.followerCount(ctx)) {
+                    val id = lm.followerId(ctx, f)
+                    val k = dict.keys[id]
+                    if (k.length > q.length && k.startsWith(q)) {
+                        offer(dict.words[id], Suggestion.Kind.WORD, dict.freqs[id] / 255f + boost(k, id) - 0.035f * (k.length - q.length) - 0.06f)
+                    }
+                }
             }
         }
         for ((w, c) in user.wordsWithPrefix(q, 8)) {
@@ -262,7 +390,7 @@ class SuggestionCore(val userFa: UserDictionary, val userEn: UserDictionary) {
                     if (k0 != q0 && k0 != q1 && subCost(q0, k0, prox, lang) > 0.5f) continue
                     val d = distance(q, k, prox, lang, maxDist)
                     if (d <= maxDist) {
-                        val s = dict.freqs[idx] / 255f + boost(k) - 0.62f * d
+                        val s = dict.freqs[idx] / 255f + boost(k, idx) - 0.62f * d
                         offer(dict.words[idx], Suggestion.Kind.CORRECTION, s)
                         if (bestCorr == null || s > bestCorr.score) {
                             bestCorr = Suggestion(dict.words[idx], Suggestion.Kind.CORRECTION, s)
@@ -307,23 +435,30 @@ class SuggestionCore(val userFa: UserDictionary, val userEn: UserDictionary) {
         val weakTyped = typedValid && !strongValid
         val allowAuto = userCount == 0 && (!typedValid || (weakTyped && bestCorrFreq >= typedFreq + 80)) &&
             // Persian: only fix toward common words, never very short ones
-            (lang != "fa" || (bestCorrFreq >= 50 && q.length >= 3))
+            (lang != "fa" || (bestCorrFreq >= FA_AUTO_MIN_FREQ && q.length >= FA_AUTO_MIN_LEN))
         val autoLimit = if (lang == "fa") when {
             // Persian has many short real words and colloquial spellings: only fix clear slips
-            q.length <= 3 -> 0.5f
-            q.length <= 5 -> 0.95f
-            else -> 1.4f
+            q.length <= 3 -> FA_AUTO_SHORT
+            q.length <= 5 -> FA_AUTO_MID
+            else -> FA_AUTO_LONG
         } else when {
             q.length <= 3 -> 0.6f   // short words: only swaps, neighbour keys, missing apostrophes
             q.length <= 4 -> 1.0f
             else -> 1.6f
         }
-        if (allowAuto && bc != null && bestCorrDist <= autoLimit) {
-            // only if the correction is also the overall best guess
-            val top = ranked.firstOrNull { !it.text.equals(query, ignoreCase = true) && !it.text.equals(q, ignoreCase = true) }
-            if (top != null && top.text.equals(bc.text, ignoreCase = true)) {
-                auto = applyCase(query, bc.text, lang)
-            }
+        // only if the correction is also the overall best guess
+        val top = ranked.firstOrNull { !it.text.equals(query, ignoreCase = true) && !it.text.equals(q, ignoreCase = true) }
+        val bcTop = bc != null && top != null && top.text.equals(bc.text, ignoreCase = true)
+        if (allowAuto && bc != null && bestCorrDist <= autoLimit && bcTop) {
+            auto = applyCase(query, bc.text, lang)
+        }
+        // a real word that doesn't fit here, one slip away from a word that clearly does
+        // ("never bake it" → "never make it"): only with the word-pair model, and only by a wide margin
+        if (auto == null && bc != null && bcTop && lm != null && ctx >= 0 && userCount == 0 && dictIdx >= 0 &&
+            q.length >= REAL_WORD_MIN_LEN && bestCorrDist <= REAL_WORD_DIST && bestCorrFreq >= REAL_WORD_MIN_FREQ
+        ) {
+            val typedScore = cands[q]?.score ?: 0f
+            if (bc.score - typedScore >= REAL_WORD_MARGIN) auto = applyCase(query, bc.text, lang)
         }
 
         // a real word typed without its half-space ("میخوام") → the proper spelling ("می‌خوام")
@@ -385,7 +520,7 @@ class SuggestionCore(val userFa: UserDictionary, val userEn: UserDictionary) {
         'ق' to "غ", 'غ' to "ق", 'ا' to "عآ", 'ع' to "اء", 'آ' to "ا", 'ء' to "ع",
     )
 
-    private fun subCost(a: Char, b: Char, prox: Map<Char, PointF>, lang: String): Float {
+    private fun subCost(a: Char, b: Char, prox: Map<Char, Pt>, lang: String): Float {
         if (a == b) return 0f
         if (lang == "fa") {
             val s = faSimilar[a]
@@ -409,7 +544,7 @@ class SuggestionCore(val userFa: UserDictionary, val userEn: UserDictionary) {
     }
 
     /** Optimal-string-alignment distance with keyboard-aware costs and early exit. */
-    private fun distance(a: String, b: String, prox: Map<Char, PointF>, lang: String, maxD: Float): Float {
+    private fun distance(a: String, b: String, prox: Map<Char, Pt>, lang: String, maxD: Float): Float {
         val n = a.length; val m = b.length
         if (m + 1 > prevRow.size) { prevRow = FloatArray(m + 8); curRow = FloatArray(m + 8); prev2Row = FloatArray(m + 8) }
         var p2 = prev2Row; var p = prevRow; var c = curRow
@@ -439,21 +574,35 @@ class SuggestionCore(val userFa: UserDictionary, val userEn: UserDictionary) {
         return p[m]
     }
 
-    // ------------------------------------------------------------------ key geometry
+    companion object {
+        // how the word-pair model counts (tuned with the typing benchmark in /bench)
+        /** score units per nat of "likelier after the previous word" (a dictionary e-fold is 28/255) */
+        @JvmField var LM_RANK = 0.08f
+        @JvmField var LM_CLAMP_DOWN = 3f
+        @JvmField var LM_CLAMP_UP = 6f
+        /** how much the model reshapes "which letter makes a word" for tap decoding (1 = fully) */
+        @JvmField var LM_TAP = 1f
+        /** nats per e-fold of how often you wrote a word after the previous one, for predictions */
+        @JvmField var USER_PREDICT = 1.2f
 
-    private fun centers(lang: String): Map<Char, PointF> {
-        val layout = Layouts.letters(lang, FieldKind.TEXT, numberRow = false, persianDigits = true)
-        val out = HashMap<Char, PointF>()
-        layout.rows.forEachIndexed { r, row ->
-            val total = row.keys.sumOf { it.width.toDouble() }.toFloat() + row.indent * 2
-            var x = (layout.units - total) / 2f + row.indent
-            for (k in row.keys) {
-                if (k.label.length == 1) out[k.label[0]] = PointF(x + k.width / 2f, r.toFloat())
-                // letters that live on a key's long-press (ض on ص, غ on ع…) sit on that same key
-                k.hint?.let { h -> if (h.length == 1 && h[0].isLetter()) out.putIfAbsent(h[0], PointF(x + k.width / 2f, r.toFloat())) }
-                x += k.width
-            }
-        }
-        return out
+        // Persian autocorrect for words that aren't words: how far (weighted edits) a fix may reach
+        @JvmField var FA_AUTO_SHORT = 0.65f
+        @JvmField var FA_AUTO_MID = 1.15f
+        @JvmField var FA_AUTO_LONG = 1.6f
+        @JvmField var FA_AUTO_MIN_FREQ = 50
+        @JvmField var FA_AUTO_MIN_LEN = 3
+
+        // fixing a real word that doesn't fit the sentence (needs the word-pair model)
+        @JvmField var REAL_WORD_MARGIN = 99f
+        @JvmField var REAL_WORD_DIST = 0.5f
+        @JvmField var REAL_WORD_MIN_LEN = 3
+        @JvmField var REAL_WORD_MIN_FREQ = 60
+
+        /** words at least this common (the, من, سلام…) never get an emoji offered after them */
+        const val EMOJI_MAX_WORD_FREQ = 200
+
+        /** a Persian stem this common, plus a standard ending, makes a real word (256 = off) */
+        @JvmField var FA_STEM_MIN_FREQ = 60
+        private val FA_ENDINGS = listOf("ی", "ای", "ش", "م", "ت", "مون", "تون", "شون", "مان", "تان", "شان")
     }
 }

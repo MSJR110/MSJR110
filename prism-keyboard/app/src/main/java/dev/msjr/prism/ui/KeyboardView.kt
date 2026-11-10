@@ -30,6 +30,7 @@ import dev.msjr.prism.keyboard.KeyType
 import dev.msjr.prism.keyboard.KeyboardLayout
 import dev.msjr.prism.text.Suggestion
 import dev.msjr.prism.text.SuggestionResult
+import dev.msjr.prism.text.TapDecoder
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.floor
@@ -66,7 +67,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         fun onKeyFeedback(key: Key?, kind: Int)
     }
 
-    enum class Toolbar { HIDE, SETTINGS, CLIPBOARD, EMOJI, ONE_HAND, ONE_HAND_SWITCH, ONE_HAND_OFF, CLOSE_PANEL, CLEAR_CLIPBOARD }
+    enum class Toolbar { HIDE, SETTINGS, CLIPBOARD, EMOJI, ONE_HAND, ONE_HAND_SWITCH, ONE_HAND_OFF, CLOSE_PANEL, CLEAR_CLIPBOARD, EMOJI_SEARCH, CLOSE_SEARCH }
     enum class Mode { KEYS, EMOJI, CLIPBOARD }
 
     var listener: Listener? = null
@@ -105,6 +106,16 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         set(v) { field = v; invalidate() }
     var clipboardStore: ClipboardStore? = null
     private var recentEmoji: List<String> = emptyList()
+    // emoji search: the letters type into [searchQuery] (null = not searching), matches show in the strip
+    private var searchQuery: String? = null
+    private var searchResults: List<String> = emptyList()
+    private var searchScroll = 0f
+    private val searchArea = RectF()
+    private var searchCell = 44f
+    private var searchHint = "Search emoji"
+    // emoji tabs (after the search button)
+    private var emojiTabsLeft = 0f
+    private var emojiTabW = 1f
     private var langLabel = "FA"
 
     // ------------------------------------------------------------------ geometry
@@ -269,6 +280,17 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
     }
 
     fun setRecentEmoji(list: List<String>) { recentEmoji = list; emojiSections = null }
+
+    /** Show emoji search in the strip ([query] null = stop searching). */
+    fun setEmojiSearch(query: String?, results: List<String>, hint: String = searchHint) {
+        if (results != searchResults) searchScroll = 0f
+        searchQuery = query
+        searchResults = if (query == null) emptyList() else results
+        searchHint = hint
+        invalidate()
+    }
+
+    val emojiSearching: Boolean get() = searchQuery != null
 
     fun setMode(m: Mode) {
         if (mode == m) return
@@ -665,6 +687,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
             Mode.CLIPBOARD -> { drawClipboardHeader(canvas, th); return }
             Mode.KEYS -> {}
         }
+        if (searchQuery != null) { drawSearchStrip(canvas, th); return }
         val slots = suggestions.slots
         val hasSuggestions = showSuggestions && slots.any { it != null }
         if (hasSuggestions) {
@@ -829,15 +852,82 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         }
     }
 
+    /** Emoji search: [×] [query field] [matching emoji…] — the keys below type into the query. */
+    private fun drawSearchStrip(canvas: Canvas, th: Theme) {
+        val w = width.toFloat()
+        val top = stripArea.top
+        val h = stripH
+        val cy = top + h / 2f
+        val s = 36 * dp
+        val close = RectF(8 * dp, cy - s / 2, 8 * dp + s, cy + s / 2)
+        toolbarBtns += Toolbar.CLOSE_SEARCH to close
+        val t = th.modTint
+        glass.drawGlass(canvas, close, s / 2, 0f, Color.rgb(Color.red(t), Color.green(t), Color.blue(t)), Color.alpha(t) / 255f, shadow = false)
+        iconPaint.color = th.label; iconPaint.alpha = 230; iconPaint.strokeWidth = 1.8f * dp
+        Icons.close(canvas, close.centerX(), close.centerY(), s, iconPaint)
+
+        // the query field
+        val q = searchQuery.orEmpty()
+        stripPaint.typeface = typeface
+        stripPaint.textSize = 15f * sp
+        val fieldW = min(w * 0.42f, max(120 * dp, stripPaint.measureText(q) + 56 * dp))
+        val field = RectF(close.right + 8 * dp, cy - s / 2, close.right + 8 * dp + fieldW, cy + s / 2)
+        glass.drawGlass(canvas, field, s / 2, 0f, th.accent, 0.30f, shadow = false)
+        iconPaint.color = th.label; iconPaint.alpha = 200; iconPaint.strokeWidth = 1.6f * dp
+        Icons.search(canvas, field.left + 18 * dp, cy, s * 0.8f, iconPaint)
+        val textLeft = field.left + 32 * dp
+        if (q.isEmpty()) {
+            stripPaint.color = th.labelDim; stripPaint.alpha = 200
+            val hint = TextUtils.ellipsize(searchHint, stripPaint, field.right - textLeft - 10 * dp, TextUtils.TruncateAt.END).toString()
+            drawCentered(canvas, hint, (textLeft + field.right - 6 * dp) / 2f, cy, stripPaint)
+        } else {
+            stripPaint.color = th.label
+            // keep the end of a long query (where you're typing) in view
+            val shown = TextUtils.ellipsize(q, stripPaint, field.right - textLeft - 14 * dp, TextUtils.TruncateAt.START).toString()
+            val tw = stripPaint.measureText(shown)
+            drawCentered(canvas, shown, textLeft + tw / 2f, cy, stripPaint)
+            accentPaint.color = th.label
+            canvas.drawRect(textLeft + tw + 2 * dp, cy - 9 * dp, textLeft + tw + 3.5f * dp, cy + 9 * dp, accentPaint)
+        }
+
+        // the matches, scrollable sideways
+        searchArea.set(field.right + 4 * dp, top, w - 4 * dp, top + h)
+        searchCell = 44 * dp
+        canvas.save()
+        canvas.clipRect(searchArea)
+        emojiPaint.textSize = 24f * sp
+        emojiPaint.alpha = 255
+        if (searchResults.isEmpty() && q.isNotEmpty()) {
+            stripPaint.color = th.labelDim; stripPaint.alpha = 160
+            drawCentered(canvas, "—", searchArea.centerX(), cy, stripPaint)
+        }
+        for ((i, e) in searchResults.withIndex()) {
+            val cx = searchArea.left + i * searchCell + searchCell / 2f - searchScroll
+            if (cx < searchArea.left - searchCell || cx > searchArea.right + searchCell) continue
+            drawCentered(canvas, e, cx, cy, emojiPaint)
+        }
+        canvas.restore()
+    }
+
+    private fun maxSearchScroll(): Float = max(0f, searchResults.size * searchCell - searchArea.width())
+
     private fun drawEmojiTabs(canvas: Canvas, th: Theme) {
         val secs = sections()
         val n = secs.size
         if (n == 0) return
-        val w = width.toFloat() / n
-        val cur = currentSection()
         toolbarBtns.clear()
+        // the search button first, then one tab per section
+        val sb = min(stripH, width / (n + 1f))
+        val search = RectF(0f, stripArea.top, sb, stripArea.bottom)
+        toolbarBtns += Toolbar.EMOJI_SEARCH to search
+        iconPaint.color = th.label; iconPaint.alpha = 220; iconPaint.strokeWidth = 1.7f * dp
+        Icons.search(canvas, search.centerX(), search.centerY(), min(sb, stripH) * 0.8f, iconPaint)
+        emojiTabsLeft = sb
+        val w = (width - sb) / n
+        emojiTabW = w
+        val cur = currentSection()
         for ((i, s) in secs.withIndex()) {
-            val r = RectF(i * w, stripArea.top, (i + 1) * w, stripArea.bottom)
+            val r = RectF(sb + i * w, stripArea.top, sb + (i + 1) * w, stripArea.bottom)
             if (i == cur) {
                 val sz = min(w, stripH) - 8 * dp
                 tmpRect.set(r.centerX() - sz / 2, r.centerY() - sz / 2, r.centerX() + sz / 2, r.centerY() + sz / 2)
@@ -1032,6 +1122,8 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         var repeat = 0
         var swipeWords = 0
         var stripIndex = -1
+        /** the finger dragged the emoji search results sideways (so lifting it is not a tap) */
+        var stripScrolled = false
         var toolbar: Toolbar? = null
         /** for [PMode.SLIDE]: the key the slide started on */
         var slideFrom: KeyType? = null
@@ -1118,7 +1210,12 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
             p.toolbar = toolbarBtns.firstOrNull { it.second.contains(x, y) }?.first
             if (p.toolbar == null && mode == Mode.EMOJI) {
                 val n = sections().size
-                if (n > 0) p.stripIndex = (x / (width.toFloat() / n)).toInt().coerceIn(0, n - 1)
+                if (n > 0 && x >= emojiTabsLeft) p.stripIndex = ((x - emojiTabsLeft) / emojiTabW).toInt().coerceIn(0, n - 1)
+            } else if (p.toolbar == null && searchQuery != null) {
+                if (searchArea.contains(x, y)) {
+                    val i = ((x - searchArea.left + searchScroll) / searchCell).toInt()
+                    if (i in searchResults.indices) p.stripIndex = SEARCH_HIT + i
+                }
             } else if (p.toolbar == null && !clipChipRect.isEmpty && clipChipRect.contains(x, y)) {
                 p.stripIndex = 100
             } else if (p.toolbar == null) {
@@ -1273,6 +1370,11 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
             PMode.TRACKPAD -> trackpadMove(p, dx, dy)
             PMode.DELETE_SWIPE -> updateDeleteSwipe(p)
             PMode.PANEL_TAP, PMode.PANEL_SCROLL -> panelMove(p, dx, dy)
+            PMode.STRIP -> if (searchQuery != null && p.toolbar == null) {
+                // drag the emoji matches sideways
+                if (!p.stripScrolled && abs(x - p.downX) > 8 * dp) p.stripScrolled = true
+                if (p.stripScrolled) { searchScroll = (searchScroll - dx).coerceIn(0f, maxSearchScroll()); invalidate() }
+            }
             else -> {}
         }
         kick()
@@ -1385,23 +1487,13 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
             if (o !== hit && !isLetterKey(o)) continue
             val dx = (tx - o.rect.centerX()) / kw
             val dy = (ty - o.rect.centerY()) / kh
-            if (o !== hit && dx * dx + dy * dy > 1.25f * 1.25f) continue
-            val s = -0.5f * (dx * dx / (SIGMA_X * SIGMA_X) + dy * dy / (SIGMA_Y * SIGMA_Y))
-            if (o === hit) { cands.add(0, o); spatial.add(0, s + HIT_BONUS) } else { cands += o; spatial += s }
+            if (o !== hit && dx * dx + dy * dy > TapDecoder.REACH * TapDecoder.REACH) continue
+            val s = TapDecoder.spatial(dx, dy, o === hit)
+            if (o === hit) { cands.add(0, o); spatial.add(0, s) } else { cands += o; spatial += s }
         }
         if (cands.size < 2) return hit
         val lm = scorer(cands.map { it.output }) ?: return hit
-        if (lm.size != cands.size) return hit
-        var top = Float.NEGATIVE_INFINITY
-        for (v in lm) { if (v.isNaN()) return hit; if (v > top) top = v }
-        if (top == Float.NEGATIVE_INFINITY) return hit // nothing known starts like this: type what was hit
-        var best = 0; var bestScore = Float.NEGATIVE_INFINITY
-        for (i in cands.indices) {
-            val rel = max(lm[i] - top, -LM_FLOOR)
-            val score = spatial[i] + LM_WEIGHT * rel
-            if (score > bestScore) { bestScore = score; best = i }
-        }
-        return cands[best]
+        return cands[TapDecoder.pick(spatial.toFloatArray(), lm)]
     }
 
     private fun onLongPress(p: Ptr) {
@@ -1592,6 +1684,10 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
             return
         }
         if (p.longFired) return
+        if (searchQuery != null) {
+            if (!p.stripScrolled && p.stripIndex >= SEARCH_HIT) searchResults.getOrNull(p.stripIndex - SEARCH_HIT)?.let { listener?.onEmoji(it) }
+            return
+        }
         if (mode == Mode.EMOJI) {
             val secs = sections()
             if (p.stripIndex in secs.indices) {
@@ -1696,15 +1792,8 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         const val FEEDBACK_LIGHT = 2
         const val FEEDBACK_HEAVY = 3
 
-        // touch model: thumb scatter around a key's centre, in key sizes
-        private const val SIGMA_X = 0.40f
-        private const val SIGMA_Y = 0.38f
-        /** head start for the key that was actually hit (in log units) */
-        private const val HIT_BONUS = 0.35f
-        /** how much "this makes a word" counts against where the finger landed */
-        private const val LM_WEIGHT = 0.65f
-        /** a letter that starts no known word is only this much (log units) worse than the best */
-        private const val LM_FLOOR = 3.5f
+        /** strip index of the first emoji search match (indexes below are other strip targets) */
+        private const val SEARCH_HIT = 1000
 
         private const val ZONE_ROWS = 4
         private const val ZONE_COLS = 3

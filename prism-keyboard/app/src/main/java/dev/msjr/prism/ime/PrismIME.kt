@@ -84,6 +84,8 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
     private var pendingPrefixZwnj = false
     private var lastSpaceAt = 0L
     private var undoCorrection: Pair<String, String>? = null // original -> corrected
+    /** emoji search: while not null, the keys type into this query instead of the app */
+    private var emojiQuery: StringBuilder? = null
     private val rejected = HashSet<String>()
     private var swipeBase = -1
     private var trackpadActive = false
@@ -231,6 +233,8 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
         lastAutoSpace = false; pendingPrefixZwnj = false; undoCorrection = null
         suggestions = SuggestionResult.EMPTY
         trackpadActive = false
+        emojiQuery = null
+        view?.setEmojiSearch(null, emptyList())
 
         view?.let {
             it.resetState()
@@ -373,7 +377,7 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
             v.setSuggestions(suggestions)
             return
         }
-        engine.request(q, prevWord, l) { r ->
+        engine.request(q, prevWord, l, capitalize = q.isEmpty() && shift == 1 && lang == "en") { r ->
             if (r.query == word.toString()) {
                 suggestions = r
                 view?.setSuggestions(r)
@@ -413,6 +417,7 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
     // ------------------------------------------------------------------ KeyboardView.Listener
 
     override fun onChar(text: String, fromPopup: Boolean) {
+        if (searchKey(text)) return
         val c = ic ?: return
         undoCorrection = null
         var out = text
@@ -470,6 +475,7 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
     }
 
     override fun onSpace() {
+        if (searchKey(" ")) return
         val c = ic ?: return
         val now = SystemClock.uptimeMillis()
         var doubled = false
@@ -550,14 +556,9 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
      * ("سلا" + م → "سلام" beats "سلا" + ن), as log weights. Null = no opinion, type what was hit.
      */
     private fun scoreLetters(cands: List<String>): FloatArray? {
-        if (!allowSuggestions || page != Page.LETTERS || midWord || cands.isEmpty()) return null
-        val w = word.toString()
-        if (w.length > 24) return null
-        val l = wordLang(w + cands[0])
-        val out = FloatArray(cands.size) { engine.prefixLogWeight(w + cands[it], prevWord, l) }
-        // the first letter of a word says less about what's coming: let the finger count for more
-        if (w.isEmpty()) for (i in out.indices) out[i] *= 0.6f
-        return out
+        if (emojiQuery != null) return null
+        if (!allowSuggestions || page != Page.LETTERS || midWord) return null
+        return engine.letterWeights(word.toString(), prevWord, cands)
     }
 
     private fun applyLateCorrection(w: String, r: SuggestionResult) {
@@ -581,6 +582,7 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
     }
 
     override fun onEnter() {
+        if (emojiQuery != null) { stopEmojiSearch(backToPanel = true); return }
         val c = ic ?: return
         finishWord(true)
         lastAutoSpace = false; pendingPrefixZwnj = false; undoCorrection = null
@@ -596,6 +598,7 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
     }
 
     override fun onDelete(repeat: Int) {
+        if (searchKey(null)) return
         val c = ic ?: return
         pendingPrefixZwnj = false
         lastAutoSpace = false
@@ -666,6 +669,7 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
     private var swipeText = ""
 
     override fun onDeleteWords(count: Int, commit: Boolean) {
+        emojiQuery?.let { if (commit && count > 0) { it.setLength(0); showEmojiSearch() }; return }
         val c = ic ?: return
         if (swipeBase < 0) {
             if (commit && count == 0) return
@@ -765,6 +769,7 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
     }
 
     override fun onSuggestion(s: Suggestion) {
+        if (s.kind == Suggestion.Kind.EMOJI) { onEmoji(s.text); return }
         val c = ic ?: return
         val w = word.toString()
         c.beginBatchEdit()
@@ -789,6 +794,8 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
         } finally {
             c.endBatchEdit()
         }
+        // a sentence-start prediction was shown capitalized: the capital is used up
+        if (shift == 1) setShiftState(0)
         if (s.kind == Suggestion.Kind.LAYOUT_FIX) {
             // you were typing in the other language — switch for the next word
             onLang()
@@ -812,7 +819,9 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
                 startActivity(i)
             }
             KeyboardView.Toolbar.CLIPBOARD -> { view?.refreshPanel(); view?.setMode(KeyboardView.Mode.CLIPBOARD) }
-            KeyboardView.Toolbar.EMOJI -> { view?.setRecentEmoji(recentEmoji()); view?.setMode(KeyboardView.Mode.EMOJI) }
+            KeyboardView.Toolbar.EMOJI -> { stopEmojiSearch(backToPanel = true) }
+            KeyboardView.Toolbar.EMOJI_SEARCH -> startEmojiSearch()
+            KeyboardView.Toolbar.CLOSE_SEARCH -> stopEmojiSearch(backToPanel = true)
             KeyboardView.Toolbar.CLOSE_PANEL -> view?.setMode(KeyboardView.Mode.KEYS)
             KeyboardView.Toolbar.HIDE -> requestHideSelf(0)
             KeyboardView.Toolbar.CLEAR_CLIPBOARD -> { clipStore.clearUnpinned(); view?.refreshPanel(); refreshClipChip() }
@@ -834,6 +843,43 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
         rec.take(32).forEach { arr.put(it) }
         Prefs.get(this).edit().putString(Prefs.RECENT_EMOJI, arr.toString()).apply()
         updateSuggestions()
+    }
+
+    // ------------------------------------------------------------------ emoji search
+
+    private fun startEmojiSearch() {
+        emojiQuery = StringBuilder()
+        if (page != Page.LETTERS) { page = Page.LETTERS; rebuildLayout() }
+        view?.setMode(KeyboardView.Mode.KEYS)
+        showEmojiSearch()
+    }
+
+    private fun showEmojiSearch() {
+        val q = emojiQuery ?: return
+        val results = if (q.isBlank()) recentEmoji().ifEmpty { STARTER_EMOJI } else engine.searchEmoji(q.toString())
+        view?.setEmojiSearch(q.toString(), results, if (lang == "fa") "جستجوی ایموجی" else "Search emoji")
+    }
+
+    private fun stopEmojiSearch(backToPanel: Boolean) {
+        emojiQuery = null
+        view?.setEmojiSearch(null, emptyList())
+        if (backToPanel) {
+            view?.setRecentEmoji(recentEmoji())
+            view?.setMode(KeyboardView.Mode.EMOJI)
+        } else updateSuggestions()
+    }
+
+    /** While searching emoji, a key edits the query ([text] null = delete). True if it was used. */
+    private fun searchKey(text: String?): Boolean {
+        val q = emojiQuery ?: return false
+        if (text == null) {
+            if (q.isNotEmpty()) q.setLength(q.length - Character.charCount(q.codePointBefore(q.length)))
+        } else if (q.length < 40) {
+            if (q.isNotEmpty() || text != " ") q.append(text)
+            if (shift == 1) setShiftState(0)
+        }
+        showEmojiSearch()
+        return true
     }
 
     private fun recentEmoji(): List<String> = try {
@@ -902,4 +948,9 @@ class PrismIME : InputMethodService(), KeyboardView.Listener, SharedPreferences.
     }
 
     private val clearChip = Runnable { view?.clipChip = null }
+
+    companion object {
+        /** shown in emoji search before anything is typed, if nothing has been used yet */
+        private val STARTER_EMOJI = "😂 ❤️ 🤣 👍 😭 🙏 😘 🥰 😍 😊 🎉 😁 💕 🥺 😅 🔥 🌹 👌 💯 ✨".split(' ')
+    }
 }
