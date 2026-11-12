@@ -8,11 +8,14 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.RenderNode
 import android.graphics.Typeface
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
-import android.text.Layout
-import android.text.StaticLayout
+import android.os.SystemClock
 import android.text.TextPaint
 import android.text.TextUtils
 import android.view.Choreographer
@@ -21,13 +24,12 @@ import android.view.VelocityTracker
 import android.view.View
 import android.view.WindowInsets
 import android.view.inputmethod.EditorInfo
-import android.widget.OverScroller
 import dev.msjr.prism.data.ClipboardStore
-import dev.msjr.prism.data.EmojiData
 import dev.msjr.prism.data.Settings
 import dev.msjr.prism.keyboard.Key
 import dev.msjr.prism.keyboard.KeyType
 import dev.msjr.prism.keyboard.KeyboardLayout
+import dev.msjr.prism.text.Pt
 import dev.msjr.prism.text.Suggestion
 import dev.msjr.prism.text.SuggestionResult
 import dev.msjr.prism.text.TapDecoder
@@ -40,12 +42,12 @@ import kotlin.math.min
 import kotlin.math.sqrt
 
 /**
- * The whole keyboard in one hardware-accelerated view: suggestion strip, keys, emoji & clipboard panels,
- * key previews and long-press popups. Everything is drawn directly — no child views, no layout passes
- * while typing — which is what keeps it smooth.
+ * The whole keyboard in one hardware-accelerated view: suggestion strip, keys, panels (emoji, clipboard,
+ * editing), key balloons, long-press popups and the glide trail. Everything is drawn directly — no child
+ * views, no layout passes while typing — and everything that moves is a spring.
  */
 @SuppressLint("ViewConstructor")
-class KeyboardView(context: Context, private val glass: GlassRenderer) : View(context) {
+class KeyboardView(context: Context, val glass: GlassRenderer) : View(context) {
 
     interface Listener {
         fun onChar(text: String, fromPopup: Boolean)
@@ -64,17 +66,29 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         fun onToolbar(action: Toolbar)
         fun onEmoji(e: String)
         fun onPasteClip(text: String)
+        fun onEdit(action: EditAction)
+        /**
+         * A word was drawn across the keys. [path]: x, y pairs in key units (key widths, row heights);
+         * [centers]: where each letter sits in the same units; [aspect]: row height / key width;
+         * [fallback]: the letter under the finger
+         * when it lifted, typed if the path makes no word.
+         */
+        fun onGlide(path: FloatArray, centers: Map<Char, Pt>, aspect: Float, fallback: String?)
         fun onKeyFeedback(key: Key?, kind: Int)
     }
 
-    enum class Toolbar { HIDE, SETTINGS, CLIPBOARD, EMOJI, ONE_HAND, ONE_HAND_SWITCH, ONE_HAND_OFF, CLOSE_PANEL, CLEAR_CLIPBOARD, EMOJI_SEARCH, CLOSE_SEARCH }
-    enum class Mode { KEYS, EMOJI, CLIPBOARD }
+    enum class Toolbar {
+        HIDE, SETTINGS, CLIPBOARD, EMOJI, EDIT, VOICE, ONE_HAND, ONE_HAND_SWITCH, ONE_HAND_OFF,
+        CLOSE_PANEL, CLEAR_CLIPBOARD, EMOJI_SEARCH, CLOSE_SEARCH, TOGGLE,
+    }
+    enum class EditAction { LEFT, RIGHT, UP, DOWN, HOME, END, SELECT, SELECT_ALL, COPY, CUT, PASTE, UNDO, REDO }
+    enum class Mode { KEYS, EMOJI, CLIPBOARD, EDIT }
 
     var listener: Listener? = null
 
     init {
         // deliver finger movement as soon as it arrives instead of once per frame:
-        // slides, the space trackpad and swipe-delete follow the finger a frame sooner
+        // slides, glides, the space trackpad and swipe-delete follow the finger a frame sooner
         if (Build.VERSION.SDK_INT >= 30) {
             try { requestUnbufferedDispatch(android.view.InputDevice.SOURCE_CLASS_POINTER) } catch (_: Throwable) { }
         }
@@ -83,19 +97,29 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
     /**
      * Asked for every letter tap with the letters the finger could have meant (the hit one first):
      * returns how well each continues the word being typed, as log weights (only differences matter),
-     * or null for "no opinion" (not in a word, no dictionary…). Lets a tap near a border pick the letter
-     * that makes a word, the way phone keyboards decode fast two-thumb typing.
+     * or null for "no opinion" (not in a word, no dictionary…).
      */
     var letterScorer: ((candidates: List<String>) -> FloatArray?)? = null
 
-    private val dp = resources.displayMetrics.density
-    private val sp = resources.displayMetrics.scaledDensity
-    private val ui = Handler(Looper.getMainLooper())
+    /** Words may be drawn across the keys right now (a text field with suggestions, not a password…). */
+    var glideEnabled = false
+    /** A voice keyboard is installed: show the microphone in the toolbar. */
+    var voiceAvailable = false
+        set(v) { if (field != v) { field = v; invalidate() } }
+    /** The editing panel's "select" switch is on. */
+    var selecting = false
+        set(v) { if (field != v) { field = v; invalidate() } }
+
+    internal val dp = resources.displayMetrics.density
+    @Suppress("DEPRECATION")
+    internal val sp = resources.displayMetrics.scaledDensity
+    internal val ui = Handler(Looper.getMainLooper())
 
     // ------------------------------------------------------------------ state
 
     private var layout: KeyboardLayout? = null
-    private var settings: Settings? = null
+    internal var settings: Settings? = null
+        private set
     var mode = Mode.KEYS
         private set
     private var shiftState = 0 // 0 off, 1 once, 2 locked
@@ -105,7 +129,6 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
     var clipChip: String? = null
         set(v) { field = v; invalidate() }
     var clipboardStore: ClipboardStore? = null
-    private var recentEmoji: List<String> = emptyList()
     // emoji search: the letters type into [searchQuery] (null = not searching), matches show in the strip
     private var searchQuery: String? = null
     private var searchResults: List<String> = emptyList()
@@ -113,46 +136,56 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
     private val searchArea = RectF()
     private var searchCell = 44f
     private var searchHint = "Search emoji"
-    // emoji tabs (after the search button)
-    private var emojiTabsLeft = 0f
-    private var emojiTabW = 1f
     private var langLabel = "FA"
+    internal val persianUi: Boolean get() = langLabel == "FA"
+    /** the toolbar was opened over the suggestions with the Prism button */
+    private var toolbarOpen = false
 
     // ------------------------------------------------------------------ geometry
 
-    val extraTop = (30 * dp)                     // transparent room for previews over the app
-    private var stripH = 46 * dp
+    val extraTop = (34 * dp)                     // transparent room for balloons over the app
+    internal var stripH = 46 * dp
     private var rowPitch = 60 * dp
-    private var keysH = 0f
-    private var bottomInset = 0
+    internal var keysH = 0f
+    internal var bottomInset = 0
     private val padTop = 4 * dp
     private val padBottom = 6 * dp
-    private val gapX = 6.5f * dp
+    internal val gapX = 6.5f * dp
     private val gapY = 12 * dp
-    private val radius = 9 * dp
+    internal val radius = 10 * dp
     private val keysArea = RectF()
     private val oneHandArea = RectF()
-    private val stripArea = RectF()
+    internal val stripArea = RectF()
     private val stripSlots = Array(3) { RectF() }
-    private val toolbarBtns = ArrayList<Pair<Toolbar, RectF>>()
+    internal val toolbarBtns = ArrayList<Pair<Toolbar, RectF>>()
     private val clipChipRect = RectF()
 
     val visibleTop: Int get() = extraTop.toInt()
 
     // ------------------------------------------------------------------ paints
 
-    private var typeface: Typeface = Typeface.DEFAULT
-    private var typefaceBold: Typeface = Typeface.DEFAULT_BOLD
-    private val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { textAlign = Paint.Align.CENTER }
+    internal var typeface: Typeface = Typeface.DEFAULT
+    internal var typefaceBold: Typeface = Typeface.DEFAULT_BOLD
+    internal val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { textAlign = Paint.Align.CENTER }
     private val hintPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { textAlign = Paint.Align.CENTER }
-    private val iconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    internal val iconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND
     }
-    private val stripPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply { textAlign = Paint.Align.CENTER }
+    internal val stripPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply { textAlign = Paint.Align.CENTER }
     private val dividerPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val emojiPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { textAlign = Paint.Align.CENTER }
-    private val cardText = TextPaint(Paint.ANTI_ALIAS_FLAG)
-    private val accentPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    internal val emojiPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { textAlign = Paint.Align.CENTER }
+    internal val accentPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val trailPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND }
+
+    // ------------------------------------------------------------------ panels
+
+    private val emojiPanel = EmojiPanel(this)
+    private val clipboardPanel = ClipboardPanel(this)
+    private val editPanel = EditPanel(this)
+    private var panel: Panel? = null
+    /** 0 = keys, 1 = the panel fully in */
+    private val panelT = Spring(0f, stiffness = 900f, damping = 1f)
+    private var leavingPanel: Panel? = null
 
     // ------------------------------------------------------------------ animation
 
@@ -163,8 +196,15 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
     private var glowX = 0f
     private var glowY = 0f
     private var glowAlpha = 0f
-    private var previewScale = 0f
-    private var popupAnim = 0f
+    private val popupT = Spring(0f, stiffness = 1500f, damping = 0.78f)
+    /** suggestions ↔ toolbar: 0 = toolbar, 1 = suggestions */
+    private val stripT = Spring(0f, stiffness = 1100f, damping = 1f)
+    /** the new resting layer fading in over the old one (layout switches, shift…) */
+    private var fade = 1f
+
+    private class Ripple(var x: Float = 0f, var y: Float = 0f, var t: Float = 1f)
+    private val ripples = Array(6) { Ripple() }
+    private var rippleNext = 0
 
     private val frame = object : Choreographer.FrameCallback {
         override fun doFrame(frameTimeNanos: Long) {
@@ -176,7 +216,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         }
     }
 
-    private fun kick() {
+    internal fun kick() {
         if (!animating) {
             animating = true
             lastFrameNs = 0L
@@ -184,56 +224,40 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         }
     }
 
-    /** advance all springs; returns true while something still moves */
+    /** advance everything that moves; returns true while something still does */
     private fun step(dt: Float): Boolean {
         var busy = false
-        layout?.let { l ->
-            for (k in l.allKeys) {
-                if (k.press != k.pressTarget || abs(k.pressVel) > 0.001f) {
-                    // instant in, quick release with one small liquid overshoot
-                    val stiff = if (k.pressTarget > k.press) 2600f else 900f
-                    val damp = if (k.pressTarget > k.press) 1f else 0.68f
-                    springStep(k, stiff, damp, dt)
-                    if (abs(k.press - k.pressTarget) < 0.002f && abs(k.pressVel) < 0.01f) {
-                        k.press = k.pressTarget; k.pressVel = 0f
-                    } else busy = true
-                }
-            }
-        }
-        for (k in panelKeys) {
-            if (k.press != k.pressTarget || abs(k.pressVel) > 0.001f) {
-                springStep(k, if (k.pressTarget > k.press) 1700f else 420f, if (k.pressTarget > k.press) 0.9f else 0.42f, dt)
-                if (abs(k.press - k.pressTarget) < 0.002f && abs(k.pressVel) < 0.01f) { k.press = k.pressTarget; k.pressVel = 0f } else busy = true
-            }
-        }
+        layout?.let { l -> for (k in l.allKeys) if (stepKey(k, dt)) busy = true }
         if (labelAlpha != labelAlphaTarget) {
             val d = labelAlphaTarget - labelAlpha
             labelAlpha += d * min(1f, dt * 14f)
             if (abs(d) < 0.01f) labelAlpha = labelAlphaTarget else busy = true
         }
-        if (glowAlpha > 0f && activePointers() == 0) {
+        if (glowAlpha > 0f && pointers.isEmpty()) {
             glowAlpha = max(0f, glowAlpha - dt * 2.4f)
             busy = busy || glowAlpha > 0f
         }
-        val previewTarget = if (pointers.values.any { it.previewKey != null }) 1f else 0f
-        if (previewScale != previewTarget) {
-            previewScale = if (previewTarget > previewScale) previewTarget else previewScale + (previewTarget - previewScale) * min(1f, dt * 30f)
-            if (abs(previewScale - previewTarget) < 0.01f) previewScale = previewTarget else busy = true
-        }
-        val popTarget = if (popupPtr != null) 1f else 0f
-        if (popupAnim != popTarget) {
-            popupAnim += (popTarget - popupAnim) * min(1f, dt * 22f)
-            if (abs(popupAnim - popTarget) < 0.01f) popupAnim = popTarget else busy = true
-        }
-        if (scroller.computeScrollOffset()) {
-            panelScroll = scroller.currY.toFloat().coerceIn(0f, maxPanelScroll())
-            busy = true
+        for (r in ripples) if (r.t < 1f) { r.t = min(1f, r.t + dt / 0.5f); busy = true }
+        popupT.target = if (popupPtr != null) 1f else 0f
+        if (popupT.step(dt)) busy = true
+        if (stripT.step(dt)) busy = true
+        if (panelT.step(dt)) busy = true else if (panelT.value == 0f) leavingPanel = null
+        if (fade < 1f) { fade = min(1f, fade + dt / 0.13f); busy = true; if (fade >= 1f) oldNode = null }
+        if ((panel ?: leavingPanel)?.step(dt) == true) busy = true
+        if (trailCount > 0) {
+            // the glide trail keeps fading after the finger lifts
+            val now = SystemClock.uptimeMillis()
+            if (now - trailT[trailCount - 1] > TRAIL_MS && pointers.values.none { it.mode == PMode.GLIDE }) trailCount = 0 else busy = true
         }
         return busy
     }
 
-    private fun springStep(k: Key, stiffness: Float, damping: Float, dt: Float) {
-        val c = 2f * damping * sqrt(stiffness)
+    internal fun stepKey(k: Key, dt: Float): Boolean {
+        if (k.press == k.pressTarget && abs(k.pressVel) <= 0.001f) return false
+        // instant in, quick release with one small liquid overshoot
+        val down = k.pressTarget > k.press
+        val stiffness = if (down) 2600f else 900f
+        val c = 2f * (if (down) 1f else 0.68f) * sqrt(stiffness)
         var t = dt
         while (t > 0f) {
             val h = min(t, 1f / 240f)
@@ -242,6 +266,8 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
             k.press += k.pressVel * h
             t -= h
         }
+        if (abs(k.press - k.pressTarget) < 0.002f && abs(k.pressVel) < 0.01f) { k.press = k.pressTarget; k.pressVel = 0f; return false }
+        return true
     }
 
     // ------------------------------------------------------------------ public API
@@ -253,11 +279,13 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         rowPitch = 60f * dp * (s.heightPct / 100f) * (if (landscape) 0.7f else 1f)
         stripH = (if (landscape) 38f else 46f) * dp
         showSuggestions = s.suggestions
+        updateLiveLight()
         requestLayout()
         invalidate()
     }
 
     fun setLayout(l: KeyboardLayout) {
+        if (layout !== l) beginFade()
         layout = l
         val oldH = keysH
         computeKeysHeight()
@@ -269,17 +297,25 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
     fun setLangLabel(s: String) { langLabel = s; invalidate() }
 
     fun setShift(state: Int) {
-        if (state != shiftState) { shiftState = state; invalidate() }
+        if (state != shiftState) { beginFade(); shiftState = state; invalidate() }
     }
 
     fun setEnterAction(action: Int) { enterAction = action; invalidate() }
 
     fun setSuggestions(r: SuggestionResult) {
         suggestions = r
+        // typing again puts the suggestions back
+        if (toolbarOpen && r.query.isNotEmpty()) toolbarOpen = false
+        updateStripTarget()
         invalidate()
     }
 
-    fun setRecentEmoji(list: List<String>) { recentEmoji = list; emojiSections = null }
+    private fun hasSuggestions() = showSuggestions && suggestions.slots.any { it != null }
+
+    private fun updateStripTarget() {
+        val t = if (hasSuggestions() && !toolbarOpen) 1f else 0f
+        if (stripT.target != t) { stripT.target = t; kick() }
+    }
 
     /** Show emoji search in the strip ([query] null = stop searching). */
     fun setEmojiSearch(query: String?, results: List<String>, hint: String = searchHint) {
@@ -295,21 +331,78 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
     fun setMode(m: Mode) {
         if (mode == m) return
         cancelAllPointers()
+        val old = panel
         mode = m
-        panelScroll = 0f
-        scroller.forceFinished(true)
-        if (m == Mode.EMOJI) emojiSections = null
-        layoutPanelKeys()
+        panel = when (m) {
+            Mode.KEYS -> null
+            Mode.EMOJI -> emojiPanel
+            Mode.CLIPBOARD -> clipboardPanel
+            Mode.EDIT -> editPanel
+        }
+        panel?.let { layoutPanel(it); it.onShow() }
+        if (panel == null) { leavingPanel = old; panelT.target = 0f }
+        else { leavingPanel = null; panelT.value = if (old == null) panelT.value else 0.4f; panelT.target = 1f }
+        toolbarOpen = false
+        updateStripTarget()
+        kick()
         invalidate()
     }
 
-    fun refreshPanel() { cardCache.clear(); invalidate() }
+    fun refreshPanel() { clipboardPanel.refresh(); emojiPanel.refresh(); invalidate() }
 
     fun resetState() {
         cancelAllPointers()
         labelAlpha = 1f; labelAlphaTarget = 1f
         glowAlpha = 0f
+        toolbarOpen = false
+        trailCount = 0
+        fade = 1f; oldNode = null
+        stripT.snap(if (hasSuggestions()) 1f else 0f)
         invalidate()
+    }
+
+    // ------------------------------------------------------------------ live light (glints follow the phone)
+
+    private val sensors: SensorManager? = try { context.getSystemService(Context.SENSOR_SERVICE) as? SensorManager } catch (_: Throwable) { null }
+    private var sensorOn = false
+    private var gx = 0f
+    private var gy = 0f
+    private val tilt = object : SensorEventListener {
+        override fun onSensorChanged(e: SensorEvent) {
+            // world "up" in screen space, smoothed; a phone lying flat falls back to the default light
+            val ax = e.values[0] / SensorManager.GRAVITY_EARTH
+            val ay = e.values[1] / SensorManager.GRAVITY_EARTH
+            gx += (ax - gx) * 0.18f
+            gy += (ay - gy) * 0.18f
+            val lx = gx * 1.15f + GlassRenderer.DEFAULT_LIGHT_X * 0.55f
+            val ly = -gy * 0.85f + GlassRenderer.DEFAULT_LIGHT_Y * 0.55f
+            if (glass.setLight(lx, ly)) invalidate()
+        }
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+    }
+
+    private fun updateLiveLight() {
+        val want = settings?.liveLight == true && windowVisibility == VISIBLE && isAttachedToWindow && glass.usesRefraction
+        if (want == sensorOn) return
+        val sm = sensors ?: return
+        if (want) {
+            val acc = sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) ?: return
+            sensorOn = sm.registerListener(tilt, acc, SensorManager.SENSOR_DELAY_UI)
+        } else {
+            sm.unregisterListener(tilt)
+            sensorOn = false
+            glass.resetLight()
+        }
+    }
+
+    override fun onWindowVisibilityChanged(visibility: Int) {
+        super.onWindowVisibilityChanged(visibility)
+        updateLiveLight()
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        updateLiveLight()
     }
 
     // ------------------------------------------------------------------ measure / layout
@@ -341,7 +434,14 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         layoutKeys()
-        layoutPanelKeys()
+        panel?.let { layoutPanel(it) }
+    }
+
+    private fun layoutPanel(p: Panel) {
+        if (width <= 0) return
+        p.header.set(0f, extraTop, width.toFloat(), extraTop + stripH)
+        p.body.set(0f, extraTop + stripH, width.toFloat(), extraTop + stripH + keysH)
+        p.layout()
     }
 
     private fun layoutKeys() {
@@ -385,9 +485,23 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
 
     // The resting keyboard (backdrop + every key unpressed) is recorded once into a GPU layer and
     // reused every frame; only keys that are moving get drawn on top. That keeps each frame cheap
-    // even though every key is a refraction shader.
-    private val restNode: RenderNode? = if (Build.VERSION.SDK_INT >= 29) RenderNode("prism-keys") else null
+    // even though every key is a refraction shader. A second layer holds the previous look while the
+    // new one fades in over it (switching pages, languages, shift).
+    private val nodeA: RenderNode? = if (Build.VERSION.SDK_INT >= 29) RenderNode("prism-keys-a") else null
+    private val nodeB: RenderNode? = if (Build.VERSION.SDK_INT >= 29) RenderNode("prism-keys-b") else null
+    private var curNode: RenderNode? = nodeA
+    private var oldNode: RenderNode? = null
     private var restSig: List<Any?>? = null
+
+    private fun beginFade() {
+        val cur = curNode ?: return
+        if (!cur.hasDisplayList() || !isShown || restSig == null || mode != Mode.KEYS) return
+        oldNode = cur
+        curNode = if (cur === nodeA) nodeB else nodeA
+        restSig = null
+        fade = 0f
+        kick()
+    }
 
     private fun restSignature(l: KeyboardLayout): List<Any?> = listOf(
         l, width, height, shiftState, enterAction, langLabel, settings, glass.generation, oneHandArea.left, oneHandArea.right,
@@ -395,7 +509,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
 
     private fun drawResting(c: Canvas, l: KeyboardLayout, th: Theme) {
         glass.drawBackdrop(c)
-        for (k in l.allKeys) drawKey(c, k, th, l, 0f)
+        for (k in l.allKeys) drawKey(c, k, th, l, 0f, 1f)
         if (!oneHandArea.isEmpty) drawOneHandSide(c, th)
     }
 
@@ -404,8 +518,11 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         val th = glass.theme
         glass.ensureBackdrop(width, (height - extraTop).toInt(), extraTop, settings?.bgMode ?: "aurora")
 
-        val node = restNode
-        val cached = node != null && mode == Mode.KEYS && labelAlpha >= 0.999f && canvas.isHardwareAccelerated
+        val pt = panelT.value.coerceIn(0f, 1f)
+        val shownPanel = panel ?: leavingPanel
+        val node = curNode
+        val cached = node != null && labelAlpha >= 0.999f && canvas.isHardwareAccelerated && pt < 0.999f
+        if (pt >= 0.999f || !cached) glass.drawBackdrop(canvas)
         if (cached && node != null) {
             val sig = restSignature(l)
             if (sig != restSig || !node.hasDisplayList()) {
@@ -415,41 +532,69 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
                 try { drawResting(rc, l, th) } finally { node.endRecording() }
                 restSig = sig
             }
+            val old = oldNode
+            if (old != null && fade < 1f && old.hasDisplayList()) {
+                old.alpha = 1f
+                canvas.drawRenderNode(old)
+                node.alpha = fade
+            } else node.alpha = 1f
             canvas.drawRenderNode(node)
             // only what's moving is drawn live, on top of its resting copy
-            for (k in l.allKeys) {
-                if (k.press > 0.004f || k.pressTarget > 0f) drawKey(canvas, k, th, l, max(0f, k.press))
+            if (pt < 0.5f) for (k in l.allKeys) {
+                if (k.press > 0.004f || k.pressTarget > 0f) drawKey(canvas, k, th, l, max(0f, k.press), 1f)
             }
-            if (glowAlpha > 0f && settings?.glow == true) glass.drawGlow(canvas, glowX, glowY, glowAlpha * 0.5f, 90 * dp)
-            drawStrip(canvas, th)
-        } else {
-            glass.drawBackdrop(canvas)
-            if (glowAlpha > 0f && settings?.glow == true) glass.drawGlow(canvas, glowX, glowY, glowAlpha, 90 * dp)
-            drawStrip(canvas, th)
-            when (mode) {
-                Mode.KEYS -> {
-                    for (k in l.allKeys) drawKey(canvas, k, th, l, k.press)
-                    if (!oneHandArea.isEmpty) drawOneHandSide(canvas, th)
-                }
-                Mode.EMOJI -> drawEmojiPanel(canvas, th)
-                Mode.CLIPBOARD -> drawClipboardPanel(canvas, th)
-            }
+        } else if (pt < 0.999f) {
+            for (k in l.allKeys) drawKey(canvas, k, th, l, k.press, 1f)
+            if (!oneHandArea.isEmpty) drawOneHandSide(canvas, th)
         }
 
-        // floating stuff
-        if (mode == Mode.KEYS) {
+        if (shownPanel != null && pt > 0.001f) {
+            // the panel rises in over the keys: the backdrop wipes them out as it comes
+            if (pt < 0.999f) {
+                canvas.saveLayerAlpha(0f, extraTop, width.toFloat(), height.toFloat(), (min(1f, pt * 1.6f) * 255).toInt())
+                glass.drawBackdrop(canvas)
+                canvas.restore()
+            }
+            canvas.save()
+            canvas.translate(0f, (1f - pt) * 18 * dp)
+            shownPanel.draw(canvas, th, pt)
+            canvas.restore()
+        } else {
+            drawLights(canvas)
+            drawStrip(canvas, th)
+            drawTrail(canvas, th)
+            // floating stuff
             for (p in pointers.values) p.previewKey?.let { drawPreview(canvas, it, p, th) }
             popupPtr?.let { drawPopup(canvas, it, th) }
         }
     }
 
-    private fun tintFor(k: Key, th: Theme): Pair<Int, Float> {
+    private fun drawLights(canvas: Canvas) {
+        if (settings?.glow != true) return
+        canvas.save()
+        glass.clipPanel(canvas)
+        if (glowAlpha > 0f) glass.drawGlow(canvas, glowX, glowY, glowAlpha * 0.5f, 90 * dp)
+        for (r in ripples) if (r.t < 1f) glass.drawRipple(canvas, r.x, r.y, r.t)
+        canvas.restore()
+    }
+
+    private fun addRipple(x: Float, y: Float) {
+        if (settings?.glow != true) return
+        val r = ripples[rippleNext]
+        rippleNext = (rippleNext + 1) % ripples.size
+        r.x = x; r.y = y; r.t = 0f
+    }
+
+    internal fun tintOf(color: Int): Pair<Int, Float> =
+        Color.rgb(Color.red(color), Color.green(color), Color.blue(color)) to Color.alpha(color) / 255f
+
+    internal fun tintFor(k: Key, th: Theme): Pair<Int, Float> {
         return when {
             // enter always wears the theme's colour; fully when it sends/searches/goes
             k.type == KeyType.ENTER -> th.accent to (if (enterHasAction()) 0.62f else if (th.dark) 0.34f else 0.30f)
-            k.type == KeyType.SHIFT && shiftState != 0 -> (if (th.dark) Color.WHITE else Color.WHITE) to (if (th.dark) 0.55f else 0.95f)
-            k.isModifier && k.type != KeyType.ZWNJ && k.type != KeyType.EMOJI -> th.modTint.let { Color.rgb(Color.red(it), Color.green(it), Color.blue(it)) to Color.alpha(it) / 255f }
-            else -> th.keyTint.let { Color.rgb(Color.red(it), Color.green(it), Color.blue(it)) to Color.alpha(it) / 255f }
+            k.type == KeyType.SHIFT && shiftState != 0 -> Color.WHITE to (if (th.dark) 0.55f else 0.95f)
+            k.isModifier && k.type != KeyType.ZWNJ && k.type != KeyType.EMOJI -> tintOf(th.modTint)
+            else -> tintOf(th.keyTint)
         }
     }
 
@@ -459,16 +604,15 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         else -> false
     }
 
-    private fun drawKey(canvas: Canvas, k: Key, th: Theme, l: KeyboardLayout, press: Float) {
+    private fun drawKey(canvas: Canvas, k: Key, th: Theme, l: KeyboardLayout, press: Float, alphaMul: Float) {
         val (tint, ta) = tintFor(k, th)
-        glass.drawGlass(canvas, k.rect, radius, press.coerceIn(-0.2f, 1.3f), tint, ta)
+        glass.drawGlass(canvas, k.rect, radius, press.coerceIn(-0.2f, 1.3f), tint, ta, alpha = alphaMul)
         if (labelAlpha <= 0.01f) return
         val shiftOn = shiftState != 0
-        val labelColor = if (k.type == KeyType.SHIFT && shiftOn && !th.dark) Color.BLACK
-        else if (k.type == KeyType.SHIFT && shiftOn) Color.BLACK
+        val labelColor = if (k.type == KeyType.SHIFT && shiftOn) Color.BLACK
         else if (k.type == KeyType.ENTER && enterHasAction()) Color.WHITE
         else th.label
-        val alpha = (labelAlpha * 255).toInt()
+        val alpha = (labelAlpha * alphaMul * 255).toInt()
         val cx = k.rect.centerX(); val cy = k.rect.centerY()
         val s = min(k.rect.height(), 46 * dp)
         iconPaint.color = labelColor; iconPaint.alpha = alpha
@@ -488,10 +632,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
                 EditorInfo.IME_ACTION_SEARCH -> Icons.search(canvas, cx, cy, s, iconPaint)
                 EditorInfo.IME_ACTION_SEND -> Icons.send(canvas, cx, cy, s, iconPaint, rtlIcons(l))
                 EditorInfo.IME_ACTION_GO, EditorInfo.IME_ACTION_NEXT -> Icons.send(canvas, cx, cy, s * 0.85f, iconPaint, rtlIcons(l))
-                EditorInfo.IME_ACTION_DONE -> {
-                    canvas.drawLine(cx - s * 0.16f, cy, cx - s * 0.04f, cy + s * 0.12f, iconPaint)
-                    canvas.drawLine(cx - s * 0.04f, cy + s * 0.12f, cx + s * 0.18f, cy - s * 0.12f, iconPaint)
-                }
+                EditorInfo.IME_ACTION_DONE -> Icons.check(canvas, cx, cy, s, iconPaint)
                 else -> Icons.enter(canvas, cx, cy, s, iconPaint, rtlIcons(l))
             }
             KeyType.SPACE -> {
@@ -550,14 +691,21 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
 
     /** A lone diacritic (َ ُ ِ ّ …) gets an invisible base so it isn't drawn on a dotted circle. */
     private fun shown(s: String): String =
-        if (s.length == 1 && Character.getType(s[0]) == Character.NON_SPACING_MARK.toInt()) "\u00A0$s" else s
+        if (s.length == 1 && Character.getType(s[0]) == Character.NON_SPACING_MARK.toInt()) " $s" else s
 
-    private fun drawCentered(c: Canvas, text: String, cx: Float, cy: Float, p: Paint) {
+    internal fun drawCentered(c: Canvas, text: String, cx: Float, cy: Float, p: Paint) {
         val fm = p.fontMetrics
         c.drawText(text, cx, cy - (fm.ascent + fm.descent) / 2f, p)
     }
 
-    // --- preview bubble (iOS style)
+    /** A round glass button with an icon drawn by [icon] (toolbar, panel headers). */
+    internal fun drawRoundButton(canvas: Canvas, r: RectF, th: Theme, alpha: Float, accent: Boolean = false, press: Float = 0f) {
+        val (t, ta) = if (accent) th.accent to 0.42f else tintOf(th.modTint)
+        glass.drawGlass(canvas, r, r.height() / 2f, press, t, ta, shadow = false, alpha = alpha)
+        iconPaint.color = th.label; iconPaint.alpha = (235 * alpha).toInt(); iconPaint.strokeWidth = 1.6f * dp
+    }
+
+    // --- preview balloon
 
     private val tmpRect = RectF()
 
@@ -565,15 +713,14 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         if (settings?.keyPreview == false || k.type != KeyType.CHAR || popupPtr === p) return
         if (layout?.id == "num") return
         val text = shown(if (p.flick && k.hint != null) k.hint else displayLabel(k))
-        // iPhone-style balloon: a wide bubble that grows out of the key itself, one piece of glass
+        // a wide bubble that grows out of the key itself, one piece of glass
         val w = max(k.rect.width() * 1.55f, 54 * dp)
         val h = k.rect.height() * 1.12f
         val cx = k.rect.centerX().coerceIn(w / 2f + 2 * dp, width - w / 2f - 2 * dp)
         var bottom = k.rect.top + 1 * dp
         if (bottom - h < 2 * dp) bottom = 2 * dp + h
         tmpRect.set(cx - w / 2f, bottom - h, cx + w / 2f, bottom)
-        val bubbleTint = th.balloon
-        glass.drawBalloon(canvas, tmpRect, 14 * dp, k.rect, radius, bubbleTint, if (th.dark) 0.78f else 0.94f)
+        glass.drawBalloon(canvas, tmpRect, 14 * dp, k.rect, radius, th.balloon, if (th.dark) 0.78f else 0.94f)
         labelPaint.typeface = typeface
         labelPaint.textSize = (if (text.length > 2) 22f else 32f) * sp
         labelPaint.color = th.label; labelPaint.alpha = 255
@@ -586,6 +733,8 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
     private var popupCols = 1
     private var popupItemW = 0f
     private var popupItemH = 0f
+    /** drawn while the popup springs shut after the finger lifted */
+    private var popupGhost: Ptr? = null
 
     private fun popupItems(p: Ptr): List<String> {
         val k = p.key ?: return emptyList()
@@ -630,12 +779,16 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
     private fun drawPopup(canvas: Canvas, p: Ptr, th: Theme) {
         val items = popupItems(p)
         if (items.isEmpty()) return
-        val bubbleTint = th.balloon
-        canvas.save()
         val k = p.key
-        if (k != null) glass.drawBalloon(canvas, popupRect, 14 * dp, k.rect, radius, bubbleTint, if (th.dark) 0.8f else 0.95f)
-        else glass.drawGlass(canvas, popupRect, 14 * dp, 0.2f, bubbleTint, if (th.dark) 0.8f else 0.95f)
-        val rows = ceil(items.size / popupCols.toFloat()).toInt()
+        // springs up out of the key
+        val t = popupT.value
+        canvas.save()
+        if (k != null && t < 0.999f) {
+            val sc = 0.6f + 0.4f * t
+            canvas.scale(sc, sc, k.rect.centerX(), k.rect.top)
+        }
+        if (k != null) glass.drawBalloon(canvas, popupRect, 14 * dp, k.rect, radius, th.balloon, if (th.dark) 0.8f else 0.95f)
+        else glass.drawGlass(canvas, popupRect, 14 * dp, 0.2f, th.balloon, if (th.dark) 0.8f else 0.95f)
         for ((i, s) in items.withIndex()) {
             val col = i % popupCols
             val row = i / popupCols
@@ -652,7 +805,6 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
             labelPaint.alpha = 255
             drawCentered(canvas, shown(s), tmpRect.centerX(), tmpRect.centerY(), labelPaint)
         }
-        if (rows > 1) { /* rows drawn above */ }
         canvas.restore()
     }
 
@@ -666,9 +818,9 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         val s = min(oneHandArea.width() * 0.8f, 46 * dp)
         oneHandBtnSwitch.set(cx - s / 2, oneHandArea.centerY() - s - 8 * dp, cx + s / 2, oneHandArea.centerY() - 8 * dp)
         oneHandBtnExpand.set(cx - s / 2, oneHandArea.centerY() + 8 * dp, cx + s / 2, oneHandArea.centerY() + 8 * dp + s)
-        val t = th.modTint
-        glass.drawGlass(canvas, oneHandBtnSwitch, s / 2, 0f, Color.rgb(Color.red(t), Color.green(t), Color.blue(t)), Color.alpha(t) / 255f)
-        glass.drawGlass(canvas, oneHandBtnExpand, s / 2, 0f, Color.rgb(Color.red(t), Color.green(t), Color.blue(t)), Color.alpha(t) / 255f)
+        val (t, ta) = tintOf(th.modTint)
+        glass.drawGlass(canvas, oneHandBtnSwitch, s / 2, 0f, t, ta)
+        glass.drawGlass(canvas, oneHandBtnExpand, s / 2, 0f, t, ta)
         iconPaint.color = th.label; iconPaint.alpha = 255; iconPaint.strokeWidth = 1.8f * dp
         Icons.chevron(canvas, oneHandBtnSwitch.centerX(), oneHandBtnSwitch.centerY(), s, iconPaint, settings?.oneHand == 2)
         Icons.expand(canvas, oneHandBtnExpand.centerX(), oneHandBtnExpand.centerY(), s, iconPaint)
@@ -676,179 +828,114 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
 
     // --- strip
 
+    private val toggleRect = RectF()
+
     private fun drawStrip(canvas: Canvas, th: Theme) {
+        toolbarBtns.clear()
+        clipChipRect.setEmpty()
+        if (searchQuery != null) { drawSearchStrip(canvas, th); return }
+        val t = stripT.value.coerceIn(0f, 1f)
+        if (t < 0.999f) drawToolbar(canvas, th, 1f - t, t)
+        if (t > 0.001f) drawSuggestions(canvas, th, t)
+    }
+
+    private fun drawSuggestions(canvas: Canvas, th: Theme, a: Float) {
         val w = width.toFloat()
         val top = stripArea.top
         val h = stripH
-        toolbarBtns.clear()
-        clipChipRect.setEmpty()
-        when (mode) {
-            Mode.EMOJI -> { drawEmojiTabs(canvas, th); return }
-            Mode.CLIPBOARD -> { drawClipboardHeader(canvas, th); return }
-            Mode.KEYS -> {}
-        }
-        if (searchQuery != null) { drawSearchStrip(canvas, th); return }
+        val cy = top + h / 2f
+        val live = stripT.target == 1f
+        // the Prism button: opens the toolbar over the suggestions
+        val bs = 34 * dp
+        toggleRect.set(7 * dp, cy - bs / 2, 7 * dp + bs, cy + bs / 2)
+        if (live) toolbarBtns += Toolbar.TOGGLE to toggleRect
+        drawRoundButton(canvas, toggleRect, th, a)
+        Icons.prism(canvas, toggleRect.centerX(), toggleRect.centerY() + 1 * dp, bs, iconPaint)
+
         val slots = suggestions.slots
-        val hasSuggestions = showSuggestions && slots.any { it != null }
-        if (hasSuggestions) {
-            val sw = w / 3f
-            // physical order: in RTL the "left" slot goes on the right
-            val rtl = layout?.rtl == true
-            for (i in 0 until 3) {
-                val pos = if (rtl) 2 - i else i
-                stripSlots[i].set(pos * sw, top, (pos + 1) * sw, top + h)
+        val left = toggleRect.right + 5 * dp
+        val sw = (w - left - 4 * dp) / 3f
+        // physical order: in RTL the "left" slot goes on the right
+        val rtl = layout?.rtl == true
+        val slide = (1f - a) * 10 * dp
+        for (i in 0 until 3) {
+            val pos = if (rtl) 2 - i else i
+            stripSlots[i].set(left + pos * sw, top, left + (pos + 1) * sw, top + h)
+        }
+        dividerPaint.color = th.labelDim; dividerPaint.alpha = (50 * a).toInt(); dividerPaint.strokeWidth = dp
+        canvas.drawLine(left + sw, top + h * 0.32f, left + sw, top + h * 0.68f, dividerPaint)
+        canvas.drawLine(left + 2 * sw, top + h * 0.32f, left + 2 * sw, top + h * 0.68f, dividerPaint)
+        for (i in 0 until 3) {
+            val s = slots[i] ?: continue
+            val r = stripSlots[i]
+            val highlighted = i == 1 && (suggestions.autoCorrect != null || s.kind == Suggestion.Kind.LAYOUT_FIX ||
+                s.kind == Suggestion.Kind.SHORTCUT || s.kind == Suggestion.Kind.EXTRA)
+            val pressed = pointers.values.any { it.mode == PMode.STRIP && it.stripIndex == i }
+            if (highlighted || pressed) {
+                tmpRect.set(r.left + 5 * dp, r.top + 6 * dp, r.right - 5 * dp, r.bottom - 6 * dp)
+                if (highlighted) glass.drawGlass(canvas, tmpRect, tmpRect.height() / 2f, if (pressed) 0.6f else 0f, th.accent, 0.42f, shadow = false, alpha = a)
+                else { val (tc, ta) = tintOf(th.keyTint); glass.drawGlass(canvas, tmpRect, tmpRect.height() / 2f, 0.5f, tc, ta, shadow = false, alpha = a) }
             }
-            dividerPaint.color = th.labelDim; dividerPaint.alpha = 50
-            canvas.drawLine(sw, top + h * 0.3f, sw, top + h * 0.7f, dividerPaint)
-            canvas.drawLine(2 * sw, top + h * 0.3f, 2 * sw, top + h * 0.7f, dividerPaint)
-            for (i in 0 until 3) {
-                val s = slots[i] ?: continue
-                val r = stripSlots[i]
-                val highlighted = i == 1 && (suggestions.autoCorrect != null || s.kind == Suggestion.Kind.LAYOUT_FIX || s.kind == Suggestion.Kind.SHORTCUT)
-                if (highlighted) {
-                    tmpRect.set(r.left + 6 * dp, r.top + 6 * dp, r.right - 6 * dp, r.bottom - 6 * dp)
-                    glass.drawGlass(canvas, tmpRect, tmpRect.height() / 2f, 0f, th.accent, 0.38f, shadow = false)
-                }
-                stripPaint.typeface = if (i == 1) typefaceBold else typeface
-                stripPaint.textSize = 16f * sp
-                stripPaint.color = if (highlighted) Color.WHITE else th.label
-                if (i != 1 && !highlighted) stripPaint.alpha = 225
-                var text = s.text
-                if (s.kind == Suggestion.Kind.TYPED && !suggestions.typedValid) text = "«$text»"
-                val shown = TextUtils.ellipsize(text, stripPaint, r.width() - 16 * dp, TextUtils.TruncateAt.END).toString()
-                drawCentered(canvas, shown, r.centerX(), r.centerY(), stripPaint)
-            }
-        } else {
-            // toolbar
-            val s = 36 * dp
-            var x = 8 * dp
-            val cy = top + h / 2f
-            val actions = listOf(Toolbar.SETTINGS, Toolbar.CLIPBOARD, Toolbar.ONE_HAND)
-            val t = th.modTint
-            for (a in actions) {
-                val r = RectF(x, cy - s / 2, x + s, cy + s / 2)
-                toolbarBtns += a to r
-                glass.drawGlass(canvas, r, s / 2, 0f, Color.rgb(Color.red(t), Color.green(t), Color.blue(t)), Color.alpha(t) / 255f, shadow = false)
-                iconPaint.color = th.label; iconPaint.alpha = 230; iconPaint.strokeWidth = 1.6f * dp
-                when (a) {
-                    Toolbar.SETTINGS -> Icons.gear(canvas, r.centerX(), r.centerY(), s, iconPaint)
-                    Toolbar.CLIPBOARD -> Icons.clipboard(canvas, r.centerX(), r.centerY(), s, iconPaint)
-                    Toolbar.EMOJI -> Icons.emoji(canvas, r.centerX(), r.centerY(), s * 0.95f, iconPaint)
-                    Toolbar.ONE_HAND -> Icons.oneHand(canvas, r.centerX(), r.centerY(), s, iconPaint)
-                    else -> {}
-                }
-                x += s + 8 * dp
-            }
-            val hide = RectF(w - 8 * dp - s, cy - s / 2, w - 8 * dp, cy + s / 2)
-            toolbarBtns += Toolbar.HIDE to hide
-            iconPaint.color = th.label; iconPaint.alpha = 230; iconPaint.strokeWidth = 2f * dp
-            val hcx = hide.centerX(); val hcy = hide.centerY(); val hs = s * 0.18f
-            canvas.drawLine(hcx - hs, hcy - hs * 0.45f, hcx, hcy + hs * 0.55f, iconPaint)
-            canvas.drawLine(hcx, hcy + hs * 0.55f, hcx + hs, hcy - hs * 0.45f, iconPaint)
-            clipChip?.let { chip ->
-                val left = x + 8 * dp
-                val right = hide.left - 6 * dp
-                if (right - left > 60 * dp) {
-                    stripPaint.typeface = typeface
-                    stripPaint.textSize = 13.5f * sp
-                    val label = TextUtils.ellipsize(chip.replace('\n', ' '), stripPaint, right - left - 40 * dp, TextUtils.TruncateAt.END).toString()
-                    val tw = stripPaint.measureText(label) + 44 * dp
-                    clipChipRect.set(right - tw, cy - s / 2, right, cy + s / 2)
-                    glass.drawGlass(canvas, clipChipRect, s / 2, 0f, th.accent, 0.35f, shadow = false)
-                    iconPaint.color = th.label; iconPaint.alpha = 255
-                    Icons.clipboard(canvas, clipChipRect.left + 18 * dp, cy, s * 0.8f, iconPaint)
-                    stripPaint.color = th.label
-                    drawCentered(canvas, label, clipChipRect.left + 32 * dp + (tw - 44 * dp) / 2f, cy, stripPaint)
-                }
-            }
+            val emoji = s.kind == Suggestion.Kind.EMOJI
+            stripPaint.typeface = if (i == 1) typefaceBold else typeface
+            stripPaint.textSize = (if (emoji) 21f else 16f) * sp
+            stripPaint.color = if (highlighted && th.dark) Color.WHITE else th.label
+            stripPaint.alpha = ((if (i != 1 && !highlighted) 225 else 255) * a).toInt()
+            var text = s.text
+            if (s.kind == Suggestion.Kind.TYPED && !suggestions.typedValid) text = "«$text»"
+            val shown = TextUtils.ellipsize(text, stripPaint, r.width() - 16 * dp, TextUtils.TruncateAt.END).toString()
+            drawCentered(canvas, shown, r.centerX(), r.centerY() + slide, stripPaint)
         }
     }
 
-    // ------------------------------------------------------------------ panels (emoji / clipboard)
-
-    private val panelKeys = ArrayList<Key>()
-    private var panelAbc: Key? = null
-    private var panelSpace: Key? = null
-    private var panelDel: Key? = null
-    private val panelContent = RectF()
-    private var panelScroll = 0f
-    private val scroller = OverScroller(context)
-    private var velocity: VelocityTracker? = null
-
-    private class EmojiSection(val icon: String, val items: List<String>, var top: Float = 0f)
-    private var emojiSections: List<EmojiSection>? = null
-    private var emojiCell = 44f
-    private var emojiCols = 8
-    private var emojiContentH = 0f
-
-    private fun layoutPanelKeys() {
-        panelKeys.clear()
-        if (width <= 0) return
-        val barH = 46 * dp
-        val area = RectF(0f, extraTop + stripH, width.toFloat(), extraTop + stripH + keysH)
-        val y0 = area.bottom - barH - 4 * dp
-        val unit = (width - 6 * dp) / 10f
-        val abcLabel = if (layout?.rtl == true) "ابپ" else "ABC"
-        val abc = Key(KeyType.LETTERS, abcLabel, width = 1.6f)
-        val space = Key(KeyType.SPACE, if (layout?.rtl == true) "فاصله" else "space", " ", 6.4f)
-        val del = Key(KeyType.DELETE, "del", width = 2f)
-        var x = 3 * dp
-        for (k in listOf(abc, space, del)) {
-            val kw = k.width * unit
-            k.rect.set(x + gapX / 2, y0, x + kw - gapX / 2, y0 + barH - 6 * dp)
-            k.hit.set(x, y0 - 4 * dp, x + kw, area.bottom + bottomInset)
-            x += kw
-            panelKeys += k
-        }
-        panelAbc = abc; panelSpace = space; panelDel = del
-        panelContent.set(area.left + 4 * dp, area.top + 2 * dp, area.right - 4 * dp, y0 - 4 * dp)
-        emojiCols = max(6, (panelContent.width() / (46 * dp)).toInt())
-        emojiCell = panelContent.width() / emojiCols
-    }
-
-    private fun sections(): List<EmojiSection> {
-        emojiSections?.let { return it }
-        val list = ArrayList<EmojiSection>()
-        val probe = Paint()
-        if (recentEmoji.isNotEmpty()) list += EmojiSection("🕘", recentEmoji)
-        for (c in EmojiData.categories) {
-            val items = c.items.filter { Build.VERSION.SDK_INT < 23 || probe.hasGlyph(it) }
-            if (items.isNotEmpty()) list += EmojiSection(c.icon, items)
-        }
-        var y = 0f
-        for (s in list) {
-            s.top = y
-            y += ceil(s.items.size / emojiCols.toFloat()) * emojiCell + 10 * dp
-        }
-        emojiContentH = y
-        emojiSections = list
-        return list
-    }
-
-    private fun maxPanelScroll(): Float = when (mode) {
-        Mode.EMOJI -> max(0f, emojiContentH - panelContent.height())
-        Mode.CLIPBOARD -> max(0f, clipContentH - panelContent.height())
-        else -> 0f
-    }
-
-    private fun drawPanelBar(canvas: Canvas, th: Theme) {
-        for (k in panelKeys) {
-            val (tint, ta) = tintFor(k, th)
-            glass.drawGlass(canvas, k.rect, radius, k.press, tint, ta)
-            iconPaint.color = th.label; iconPaint.alpha = 255; iconPaint.strokeWidth = 1.8f * dp
-            when (k.type) {
-                KeyType.DELETE -> Icons.delete(canvas, k.rect.centerX(), k.rect.centerY(), k.rect.height(), iconPaint, false)
-                KeyType.SPACE -> {
-                    labelPaint.typeface = typeface; labelPaint.textSize = 13f * sp
-                    labelPaint.color = th.labelDim; labelPaint.alpha = 220
-                    drawCentered(canvas, k.label, k.rect.centerX(), k.rect.centerY(), labelPaint)
-                }
-                else -> {
-                    labelPaint.typeface = typefaceBold; labelPaint.textSize = 15f * sp
-                    labelPaint.color = th.label; labelPaint.alpha = 255
-                    drawCentered(canvas, k.label, k.rect.centerX(), k.rect.centerY(), labelPaint)
-                }
+    private fun drawToolbar(canvas: Canvas, th: Theme, a: Float, t: Float) {
+        val w = width.toFloat()
+        val top = stripArea.top
+        val h = stripH
+        val live = stripT.target == 0f
+        val s = 36 * dp
+        var x = 7 * dp
+        val cy = top + h / 2f - t * 10 * dp
+        val actions = ArrayList<Toolbar>(6)
+        // opened over the suggestions: the first button takes you back to them
+        if (toolbarOpen && hasSuggestions()) actions += Toolbar.TOGGLE
+        actions += Toolbar.SETTINGS; actions += Toolbar.CLIPBOARD; actions += Toolbar.EDIT
+        if (voiceAvailable) actions += Toolbar.VOICE
+        actions += Toolbar.ONE_HAND
+        for (act in actions) {
+            val r = RectF(x, cy - s / 2, x + s, cy + s / 2)
+            if (live) toolbarBtns += act to r
+            val pressed = pointers.values.any { it.mode == PMode.STRIP && it.toolbar == act }
+            drawRoundButton(canvas, r, th, a, press = if (pressed) 0.8f else 0f)
+            when (act) {
+                Toolbar.TOGGLE -> Icons.chevron(canvas, r.centerX() - dp, r.centerY(), s, iconPaint, true)
+                Toolbar.SETTINGS -> Icons.gear(canvas, r.centerX(), r.centerY(), s, iconPaint)
+                Toolbar.CLIPBOARD -> Icons.clipboard(canvas, r.centerX(), r.centerY(), s, iconPaint)
+                Toolbar.EDIT -> Icons.editCursor(canvas, r.centerX(), r.centerY(), s, iconPaint)
+                Toolbar.VOICE -> Icons.mic(canvas, r.centerX(), r.centerY(), s, iconPaint)
+                Toolbar.ONE_HAND -> Icons.oneHand(canvas, r.centerX(), r.centerY(), s, iconPaint)
+                else -> {}
             }
+            x += s + 7 * dp
+        }
+        val hide = RectF(w - 7 * dp - s, cy - s / 2, w - 7 * dp, cy + s / 2)
+        if (live) toolbarBtns += Toolbar.HIDE to hide
+        iconPaint.color = th.label; iconPaint.alpha = (230 * a).toInt(); iconPaint.strokeWidth = 2f * dp
+        Icons.chevronDown(canvas, hide.centerX(), hide.centerY(), s, iconPaint)
+        val chip = clipChip ?: return
+        val left = x + 4 * dp
+        val right = hide.left - 4 * dp
+        if (right - left > 60 * dp) {
+            stripPaint.typeface = typeface
+            stripPaint.textSize = 13.5f * sp
+            val label = TextUtils.ellipsize(chip.replace('\n', ' '), stripPaint, right - left - 40 * dp, TextUtils.TruncateAt.END).toString()
+            val tw = stripPaint.measureText(label) + 44 * dp
+            clipChipRect.set(right - tw, cy - s / 2, right, cy + s / 2)
+            glass.drawGlass(canvas, clipChipRect, s / 2, 0f, th.accent, 0.38f, shadow = false, alpha = a)
+            iconPaint.color = th.label; iconPaint.alpha = (255 * a).toInt(); iconPaint.strokeWidth = 1.6f * dp
+            Icons.clipboard(canvas, clipChipRect.left + 18 * dp, cy, s * 0.8f, iconPaint)
+            stripPaint.color = th.label; stripPaint.alpha = (255 * a).toInt()
+            drawCentered(canvas, label, clipChipRect.left + 32 * dp + (tw - 44 * dp) / 2f, cy, stripPaint)
         }
     }
 
@@ -859,11 +946,10 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         val h = stripH
         val cy = top + h / 2f
         val s = 36 * dp
-        val close = RectF(8 * dp, cy - s / 2, 8 * dp + s, cy + s / 2)
+        val close = RectF(7 * dp, cy - s / 2, 7 * dp + s, cy + s / 2)
         toolbarBtns += Toolbar.CLOSE_SEARCH to close
-        val t = th.modTint
-        glass.drawGlass(canvas, close, s / 2, 0f, Color.rgb(Color.red(t), Color.green(t), Color.blue(t)), Color.alpha(t) / 255f, shadow = false)
-        iconPaint.color = th.label; iconPaint.alpha = 230; iconPaint.strokeWidth = 1.8f * dp
+        drawRoundButton(canvas, close, th, 1f)
+        iconPaint.strokeWidth = 1.8f * dp
         Icons.close(canvas, close.centerX(), close.centerY(), s, iconPaint)
 
         // the query field
@@ -871,7 +957,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         stripPaint.typeface = typeface
         stripPaint.textSize = 15f * sp
         val fieldW = min(w * 0.42f, max(120 * dp, stripPaint.measureText(q) + 56 * dp))
-        val field = RectF(close.right + 8 * dp, cy - s / 2, close.right + 8 * dp + fieldW, cy + s / 2)
+        val field = RectF(close.right + 7 * dp, cy - s / 2, close.right + 7 * dp + fieldW, cy + s / 2)
         glass.drawGlass(canvas, field, s / 2, 0f, th.accent, 0.30f, shadow = false)
         iconPaint.color = th.label; iconPaint.alpha = 200; iconPaint.strokeWidth = 1.6f * dp
         Icons.search(canvas, field.left + 18 * dp, cy, s * 0.8f, iconPaint)
@@ -911,180 +997,50 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
 
     private fun maxSearchScroll(): Float = max(0f, searchResults.size * searchCell - searchArea.width())
 
-    private fun drawEmojiTabs(canvas: Canvas, th: Theme) {
-        val secs = sections()
-        val n = secs.size
-        if (n == 0) return
-        toolbarBtns.clear()
-        // the search button first, then one tab per section
-        val sb = min(stripH, width / (n + 1f))
-        val search = RectF(0f, stripArea.top, sb, stripArea.bottom)
-        toolbarBtns += Toolbar.EMOJI_SEARCH to search
-        iconPaint.color = th.label; iconPaint.alpha = 220; iconPaint.strokeWidth = 1.7f * dp
-        Icons.search(canvas, search.centerX(), search.centerY(), min(sb, stripH) * 0.8f, iconPaint)
-        emojiTabsLeft = sb
-        val w = (width - sb) / n
-        emojiTabW = w
-        val cur = currentSection()
-        for ((i, s) in secs.withIndex()) {
-            val r = RectF(sb + i * w, stripArea.top, sb + (i + 1) * w, stripArea.bottom)
-            if (i == cur) {
-                val sz = min(w, stripH) - 8 * dp
-                tmpRect.set(r.centerX() - sz / 2, r.centerY() - sz / 2, r.centerX() + sz / 2, r.centerY() + sz / 2)
-                glass.drawGlass(canvas, tmpRect, sz / 2, 0f, th.accent, 0.35f, shadow = false)
-            }
-            emojiPaint.textSize = 18f * sp
-            emojiPaint.alpha = if (i == cur) 255 else 170
-            drawCentered(canvas, s.icon, r.centerX(), r.centerY(), emojiPaint)
+    // --- glide trail
+
+    private var trailX = FloatArray(256)
+    private var trailY = FloatArray(256)
+    private var trailT = LongArray(256)
+    private var trailCount = 0
+
+    private fun trailAdd(x: Float, y: Float) {
+        if (trailCount == trailX.size) {
+            // drop the oldest half: only the recent tail is ever drawn
+            val half = trailCount / 2
+            System.arraycopy(trailX, half, trailX, 0, trailCount - half)
+            System.arraycopy(trailY, half, trailY, 0, trailCount - half)
+            System.arraycopy(trailT, half, trailT, 0, trailCount - half)
+            trailCount -= half
         }
+        trailX[trailCount] = x; trailY[trailCount] = y; trailT[trailCount] = SystemClock.uptimeMillis()
+        trailCount++
     }
 
-    private fun currentSection(): Int {
-        val secs = emojiSections ?: return 0
-        var cur = 0
-        for ((i, s) in secs.withIndex()) if (s.top <= panelScroll + emojiCell * 0.5f) cur = i
-        return cur
-    }
-
-    private fun drawEmojiPanel(canvas: Canvas, th: Theme) {
-        val secs = sections()
+    private fun drawTrail(canvas: Canvas, th: Theme) {
+        if (trailCount < 2) return
+        val now = SystemClock.uptimeMillis()
+        val core = if (th.dark) Theme.blend(th.accent, Color.WHITE, 0.55f) else th.accent
         canvas.save()
-        canvas.clipRect(panelContent)
-        emojiPaint.textSize = 27f * sp
-        emojiPaint.alpha = 255
-        val top = panelContent.top - panelScroll
-        for (s in secs) {
-            val sTop = top + s.top
-            val rows = ceil(s.items.size / emojiCols.toFloat()).toInt()
-            if (sTop > panelContent.bottom || sTop + rows * emojiCell < panelContent.top) continue
-            for ((i, e) in s.items.withIndex()) {
-                val r = i / emojiCols; val c = i % emojiCols
-                val cy = sTop + r * emojiCell + emojiCell / 2f
-                if (cy < panelContent.top - emojiCell || cy > panelContent.bottom + emojiCell) continue
-                val cx = panelContent.left + c * emojiCell + emojiCell / 2f
-                if (pressedEmoji == e && pressedEmojiSection === s) {
-                    tmpRect.set(cx - emojiCell / 2 + 2 * dp, cy - emojiCell / 2 + 2 * dp, cx + emojiCell / 2 - 2 * dp, cy + emojiCell / 2 - 2 * dp)
-                    accentPaint.color = GlassRenderer.adjustAlpha(th.accent, 0.45f)
-                    canvas.drawRoundRect(tmpRect, 12 * dp, 12 * dp, accentPaint)
-                }
-                drawCentered(canvas, e, cx, cy, emojiPaint)
+        glass.clipPanel(canvas)
+        for (pass in 0..1) {
+            // a soft wide halo under a bright thin core, both tapering toward the tail
+            trailPaint.color = if (pass == 0) th.accent else core
+            for (i in 1 until trailCount) {
+                val age = (now - trailT[i]).toFloat() / TRAIL_MS
+                if (age >= 1f) continue
+                val life = 1f - age
+                trailPaint.strokeWidth = (if (pass == 0) 15f else 5.5f) * dp * (0.35f + 0.65f * life)
+                trailPaint.alpha = ((if (pass == 0) 60 else 230) * life * life).toInt()
+                canvas.drawLine(trailX[i - 1], trailY[i - 1], trailX[i], trailY[i], trailPaint)
             }
         }
         canvas.restore()
-        drawPanelBar(canvas, th)
-    }
-
-    private var pressedEmoji: String? = null
-    private var pressedEmojiSection: Any? = null
-
-    private fun emojiAt(x: Float, y: Float): Pair<String, Any>? {
-        if (!panelContent.contains(x, y)) return null
-        val cy = y - panelContent.top + panelScroll
-        for (s in sections()) {
-            val rows = ceil(s.items.size / emojiCols.toFloat()).toInt()
-            if (cy >= s.top && cy < s.top + rows * emojiCell) {
-                val r = ((cy - s.top) / emojiCell).toInt()
-                val c = ((x - panelContent.left) / emojiCell).toInt().coerceIn(0, emojiCols - 1)
-                val idx = r * emojiCols + c
-                return if (idx < s.items.size) s.items[idx] to s else null
-            }
-        }
-        return null
-    }
-
-    // --- clipboard
-
-    private class Card(val item: ClipboardStore.Item, val rect: RectF, val layout: StaticLayout)
-    private val cardCache = ArrayList<Card>()
-    private var clipContentH = 0f
-
-    private fun clipCards(th: Theme): List<Card> {
-        if (cardCache.isNotEmpty()) return cardCache
-        val items = clipboardStore?.all() ?: emptyList()
-        val cols = 2
-        val gap = 8 * dp
-        val cw = (panelContent.width() - gap) / cols
-        val ch = 70 * dp
-        cardText.textSize = 13.5f * sp
-        cardText.typeface = typeface
-        cardText.color = th.label
-        for ((i, it) in items.withIndex()) {
-            val c = i % cols; val r = i / cols
-            val rect = RectF(c * (cw + gap), r * (ch + gap), c * (cw + gap) + cw, r * (ch + gap) + ch)
-            val text = it.text.take(300)
-            val sl = StaticLayout.Builder.obtain(text, 0, text.length, cardText, (cw - 20 * dp).toInt())
-                .setMaxLines(3).setEllipsize(TextUtils.TruncateAt.END)
-                .setAlignment(Layout.Alignment.ALIGN_NORMAL).build()
-            cardCache += Card(it, rect, sl)
-        }
-        clipContentH = if (items.isEmpty()) 0f else ceil(items.size / cols.toFloat()) * (ch + gap)
-        return cardCache
-    }
-
-    private fun drawClipboardHeader(canvas: Canvas, th: Theme) {
-        stripPaint.typeface = typefaceBold
-        stripPaint.textSize = 15f * sp
-        stripPaint.color = th.label
-        drawCentered(canvas, "کلیپ‌بورد", width / 2f, stripArea.centerY(), stripPaint)
-        val s = 34 * dp
-        val cy = stripArea.centerY()
-        val close = RectF(8 * dp, cy - s / 2, 8 * dp + s, cy + s / 2)
-        val clear = RectF(width - 8 * dp - s, cy - s / 2, width - 8 * dp, cy + s / 2)
-        val t = th.modTint
-        for ((a, r) in listOf(Toolbar.CLOSE_PANEL to close, Toolbar.CLEAR_CLIPBOARD to clear)) {
-            toolbarBtns += a to r
-            glass.drawGlass(canvas, r, s / 2, 0f, Color.rgb(Color.red(t), Color.green(t), Color.blue(t)), Color.alpha(t) / 255f, shadow = false)
-            iconPaint.color = th.label; iconPaint.alpha = 255; iconPaint.strokeWidth = 1.6f * dp
-            if (a == Toolbar.CLOSE_PANEL) Icons.close(canvas, r.centerX(), r.centerY(), s, iconPaint)
-            else Icons.trash(canvas, r.centerX(), r.centerY(), s, iconPaint)
-        }
-    }
-
-    private fun drawClipboardPanel(canvas: Canvas, th: Theme) {
-        val cards = clipCards(th)
-        canvas.save()
-        canvas.clipRect(panelContent)
-        if (cards.isEmpty()) {
-            stripPaint.typeface = typeface; stripPaint.textSize = 14f * sp
-            stripPaint.color = th.labelDim
-            drawCentered(canvas, "هنوز چیزی کپی نکردی", panelContent.centerX(), panelContent.centerY() - 10 * dp, stripPaint)
-            stripPaint.textSize = 12f * sp
-            drawCentered(canvas, "متن‌هایی که کپی می‌کنی اینجا جمع می‌شن (فقط روی گوشی خودت)", panelContent.centerX(), panelContent.centerY() + 14 * dp, stripPaint)
-        }
-        val (tint, ta) = th.keyTint.let { Color.rgb(Color.red(it), Color.green(it), Color.blue(it)) to Color.alpha(it) / 255f }
-        for (c in cards) {
-            tmpRect.set(c.rect)
-            tmpRect.offset(panelContent.left, panelContent.top - panelScroll)
-            if (tmpRect.bottom < panelContent.top || tmpRect.top > panelContent.bottom) continue
-            val pressed = pressedCard === c
-            glass.drawGlass(canvas, tmpRect, 14 * dp, if (pressed) 1f else 0f, if (c.item.pinned) th.accent else tint,
-                if (c.item.pinned) 0.3f else ta, shadow = false)
-            canvas.save()
-            canvas.translate(tmpRect.left + 10 * dp, tmpRect.top + 8 * dp)
-            cardText.color = th.label
-            c.layout.draw(canvas)
-            canvas.restore()
-            if (c.item.pinned) {
-                iconPaint.color = th.label; iconPaint.alpha = 220; iconPaint.strokeWidth = 1.4f * dp
-                Icons.pin(canvas, tmpRect.right - 12 * dp, tmpRect.bottom - 14 * dp, 28 * dp, iconPaint)
-            }
-        }
-        canvas.restore()
-        drawPanelBar(canvas, th)
-    }
-
-    private var pressedCard: Card? = null
-
-    private fun cardAt(x: Float, y: Float): Card? {
-        if (!panelContent.contains(x, y)) return null
-        val lx = x - panelContent.left
-        val ly = y - panelContent.top + panelScroll
-        return cardCache.firstOrNull { it.rect.contains(lx, ly) }
     }
 
     // ------------------------------------------------------------------ touch
 
-    private enum class PMode { KEY, SLIDE, TRACKPAD, DELETE_SWIPE, STRIP, PANEL_SCROLL, PANEL_TAP, PANEL_KEY, ONE_HAND, NONE }
+    private enum class PMode { KEY, SLIDE, GLIDE, TRACKPAD, DELETE_SWIPE, STRIP, PANEL, ONE_HAND, NONE }
 
     /** Follow a finger that slid off !#1 / shift: light up the character under it. */
     private fun slideTo(p: Ptr, x: Float, y: Float) {
@@ -1127,14 +1083,26 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         var toolbar: Toolbar? = null
         /** for [PMode.SLIDE]: the key the slide started on */
         var slideFrom: KeyType? = null
+        /** the finger's path while it may be drawing a word: x, y pairs in pixels */
+        var path = FloatArray(0)
+        var pathN = 0
         val longPress = Runnable { onLongPress(this) }
         val repeater = Runnable { onRepeat(this) }
+
+        fun pathAdd(px: Float, py: Float) {
+            if (pathN > 0) {
+                val dx = px - path[pathN * 2 - 2]; val dy = py - path[pathN * 2 - 1]
+                if (dx * dx + dy * dy < 4f * dp * dp) return
+            }
+            if (pathN * 2 + 2 > path.size) path = path.copyOf(max(64, path.size * 2))
+            path[pathN * 2] = px; path[pathN * 2 + 1] = py
+            pathN++
+        }
     }
 
     private val pointers = HashMap<Int, Ptr>()
     private var popupPtr: Ptr? = null
-
-    private fun activePointers() = pointers.size
+    private var velocity: VelocityTracker? = null
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(e: MotionEvent): Boolean {
@@ -1144,7 +1112,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
                 val id = e.getPointerId(idx)
                 val x = e.getX(idx); val y = e.getY(idx)
                 if (y < extraTop) return e.actionMasked != MotionEvent.ACTION_DOWN
-                if (mode != Mode.KEYS && e.actionMasked == MotionEvent.ACTION_DOWN) {
+                if (e.actionMasked == MotionEvent.ACTION_DOWN) {
                     velocity?.recycle(); velocity = VelocityTracker.obtain()
                 }
                 velocity?.addMovement(e)
@@ -1154,6 +1122,14 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
                 velocity?.addMovement(e)
                 for (i in 0 until e.pointerCount) {
                     val p = pointers[e.getPointerId(i)] ?: continue
+                    // a glide wants every point the screen reported, not just the latest
+                    if (p.mode == PMode.GLIDE || (p.mode == PMode.KEY && p.pathN > 0)) {
+                        for (hI in 0 until e.historySize) {
+                            val hx = e.getHistoricalX(i, hI); val hy = e.getHistoricalY(i, hI)
+                            p.pathAdd(hx, hy)
+                            if (p.mode == PMode.GLIDE) trailAdd(hx, hy)
+                        }
+                    }
                     move(p, e.getX(i), e.getY(i))
                 }
             }
@@ -1177,10 +1153,11 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
             p.key?.pressTarget = 0f
             if (p.mode == PMode.TRACKPAD) { labelAlphaTarget = 1f; listener?.onTrackpad(false) }
             if (p.mode == PMode.DELETE_SWIPE) listener?.onDeleteWords(0, true)
+            if (p.mode == PMode.PANEL) (panel ?: leavingPanel)?.cancel()
         }
         pointers.clear()
         popupPtr = null
-        pressedEmoji = null; pressedCard = null
+        trailCount = 0
         kick()
     }
 
@@ -1200,36 +1177,43 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
     private fun down(id: Int, x: Float, y: Float) {
         val p = Ptr(id)
         p.downX = x; p.downY = y; p.x = x; p.y = y; p.lastX = x; p.lastY = y
-        p.downTime = System.currentTimeMillis()
+        p.downTime = SystemClock.uptimeMillis()
         pointers[id] = p
+
+        if (mode != Mode.KEYS) {
+            // panels follow one finger
+            if (pointers.values.none { it !== p && it.mode == PMode.PANEL }) {
+                p.mode = PMode.PANEL
+                panel?.down(x, y)
+            }
+            kick()
+            return
+        }
+
         glowX = x; glowY = y; if (settings?.glow == true) glowAlpha = 1f
 
         // strip
         if (stripArea.contains(x, y)) {
             p.mode = PMode.STRIP
             p.toolbar = toolbarBtns.firstOrNull { it.second.contains(x, y) }?.first
-            if (p.toolbar == null && mode == Mode.EMOJI) {
-                val n = sections().size
-                if (n > 0 && x >= emojiTabsLeft) p.stripIndex = ((x - emojiTabsLeft) / emojiTabW).toInt().coerceIn(0, n - 1)
-            } else if (p.toolbar == null && searchQuery != null) {
+            if (p.toolbar == null && searchQuery != null) {
                 if (searchArea.contains(x, y)) {
                     val i = ((x - searchArea.left + searchScroll) / searchCell).toInt()
                     if (i in searchResults.indices) p.stripIndex = SEARCH_HIT + i
                 }
             } else if (p.toolbar == null && !clipChipRect.isEmpty && clipChipRect.contains(x, y)) {
                 p.stripIndex = 100
-            } else if (p.toolbar == null) {
+            } else if (p.toolbar == null && stripT.target == 1f) {
                 p.stripIndex = stripSlots.indexOfFirst { it.contains(x, y) }
                 if (p.stripIndex >= 0 && suggestions.slots[p.stripIndex] != null) {
                     ui.postDelayed(p.longPress, 500)
-                }
+                } else p.stripIndex = -1
             }
             if (p.toolbar != null || p.stripIndex >= 0) listener?.onKeyFeedback(null, FEEDBACK_LIGHT)
+            invalidate()
             kick()
             return
         }
-
-        if (mode != Mode.KEYS) { panelDown(p, x, y); return }
 
         if (!oneHandArea.isEmpty && oneHandArea.contains(x, y)) {
             p.mode = PMode.ONE_HAND
@@ -1246,6 +1230,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         // feedback and the pressed look first: they're what the finger "feels", so nothing
         // (not even typing the previous finger's letter) may delay them
         listener?.onKeyFeedback(k, FEEDBACK_DOWN)
+        addRipple(k.rect.centerX(), k.rect.centerY())
         // deleting a letter the decoder just changed: type the next one exactly where it's tapped
         if (k.type == KeyType.DELETE) { if (lastDecoded) noDecodeNext = true; lastDecoded = false }
         p.key = k
@@ -1253,13 +1238,15 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         p.mode = PMode.KEY
         k.pressTarget = 1f
         k.press = max(k.press, 0.85f); k.pressVel = 0f
-        if (k.type == KeyType.CHAR) { p.previewKey = k; previewScale = 1f }
+        if (k.type == KeyType.CHAR) p.previewKey = k
         invalidate()
 
         // rollover: a second finger lands while the first is still on a character or space —
         // type the first one now so fast typing keeps its order
         for (o in pointers.values) {
-            if (o === p || o.mode != PMode.KEY || o.committed || popupPtr === o) continue
+            if (o === p || popupPtr === o) continue
+            if (o.mode == PMode.GLIDE) { finishGlide(o); o.committed = true; o.mode = PMode.NONE; continue }
+            if (o.mode != PMode.KEY || o.committed) continue
             when (o.key?.type) {
                 KeyType.CHAR -> { commitChar(o); learnTouch(o) }
                 KeyType.SPACE -> if (!o.longFired) listener?.onSpace() else continue
@@ -1272,6 +1259,9 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
             ui.removeCallbacks(o.longPress)
         }
 
+        // a letter pressed alone may be the start of a glide: start remembering the path
+        if (glideEnabled && settings?.glide == true && pointers.size == 1 && isLetterKey(k) && isLetterPage()) p.pathAdd(x, y)
+
         val lp = (settings?.longPressMs ?: 320).toLong()
         when (k.type) {
             KeyType.DELETE -> {
@@ -1281,17 +1271,20 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
             KeyType.SHIFT -> listener?.onShiftDown()
             KeyType.SPACE -> ui.postDelayed(p.longPress, lp + 60)
             KeyType.LANG -> ui.postDelayed(p.longPress, 450)
+            KeyType.ENTER -> ui.postDelayed(p.longPress, lp + 80)
             KeyType.CHAR, KeyType.ZWNJ, KeyType.EMOJI -> if (k.popup.isNotEmpty() || k.hint != null) ui.postDelayed(p.longPress, lp)
             else -> {}
         }
         kick()
     }
 
+    private fun isLetterPage(): Boolean = layout?.id.let { it == "fa" || it == "en" }
+
     private fun move(p: Ptr, x: Float, y: Float, lifting: Boolean = false) {
         val dx = x - p.lastX; val dy = y - p.lastY
         p.lastX = x; p.lastY = y
         p.x = x; p.y = y
-        if (p.mode != PMode.PANEL_SCROLL && p.mode != PMode.PANEL_TAP) { glowX = x; glowY = y; if (settings?.glow == true) glowAlpha = 1f }
+        if (p.mode != PMode.PANEL) { glowX = x; glowY = y; if (settings?.glow == true) glowAlpha = 1f }
         when (p.mode) {
             PMode.KEY -> {
                 val k = p.key ?: return
@@ -1309,7 +1302,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
                         }
                     }
                     KeyType.SYMBOLS, KeyType.SYMBOLS2, KeyType.LETTERS, KeyType.SHIFT -> {
-                        // iPhone trick: press !#1 (or shift), slide onto a character and let go —
+                        // press !#1 (or shift), slide onto a character and let go —
                         // it's typed and you're back where you were, in one motion
                         val out = max(max(k.hit.left - x, x - k.hit.right) / k.rect.width(),
                             max(k.hit.top - y, y - k.hit.bottom) / k.rect.height())
@@ -1333,43 +1326,15 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
                             updateDeleteSwipe(p)
                         }
                     }
-                    KeyType.CHAR -> {
-                        if (p.flickByLong) return
-                        val upDist = p.downY - y
-                        // a deliberate flick up: well past the key's middle and mostly vertical,
-                        // so a thumb rolling off a key while tapping doesn't type the corner letter
-                        if (k.hint != null && upDist > k.rect.height() * 0.7f && abs(x - p.downX) < upDist * 0.7f) {
-                            if (!p.flick) { p.flick = true; ui.removeCallbacks(p.longPress); invalidate() }
-                            return
-                        } else if (p.flick && upDist < k.rect.height() * 0.4f) {
-                            p.flick = false; invalidate()
-                        }
-                        // a thumb rolls as it lifts and the last reported point jumps: never change the
-                        // letter on the lift itself, nor during a quick tap — only a held, deliberate slide
-                        if (!p.flick && !lifting && System.currentTimeMillis() - p.downTime > 140) {
-                            // slide to correct: only once the finger is clearly inside another key,
-                            // so the small drift of a fast tap never changes the letter
-                            val outX = max(0f, max(k.hit.left - x, x - k.hit.right))
-                            val outY = max(0f, max(k.hit.top - y, y - k.hit.bottom))
-                            val nk = if (outX > k.rect.width() * 0.4f || outY > k.rect.height() * 0.4f) keyAt(x, y) else null
-                            if (nk != null && nk !== k && nk.type == KeyType.CHAR) {
-                                k.pressTarget = 0f
-                                nk.pressTarget = 1f
-                                p.key = nk
-                                p.previewKey = nk
-                                ui.removeCallbacks(p.longPress)
-                                if (nk.popup.isNotEmpty() || nk.hint != null) ui.postDelayed(p.longPress, (settings?.longPressMs ?: 320).toLong())
-                                kick()
-                            }
-                        }
-                    }
+                    KeyType.CHAR -> moveOnChar(p, k, x, y, lifting)
                     else -> {}
                 }
             }
+            PMode.GLIDE -> { p.pathAdd(x, y); trailAdd(x, y) }
             PMode.SLIDE -> slideTo(p, x, y)
             PMode.TRACKPAD -> trackpadMove(p, dx, dy)
             PMode.DELETE_SWIPE -> updateDeleteSwipe(p)
-            PMode.PANEL_TAP, PMode.PANEL_SCROLL -> panelMove(p, dx, dy)
+            PMode.PANEL -> panel?.move(x, y)
             PMode.STRIP -> if (searchQuery != null && p.toolbar == null) {
                 // drag the emoji matches sideways
                 if (!p.stripScrolled && abs(x - p.downX) > 8 * dp) p.stripScrolled = true
@@ -1378,6 +1343,85 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
             else -> {}
         }
         kick()
+    }
+
+    private fun moveOnChar(p: Ptr, k: Key, x: Float, y: Float, lifting: Boolean) {
+        if (p.flickByLong) return
+        val canGlide = p.pathN > 0 && k === p.downKey && pointers.size == 1 && !p.committed
+        if (canGlide) p.pathAdd(x, y)
+        val upDist = p.downY - y
+        val side = abs(x - p.downX)
+        // a deliberate flick up: well past the key's middle and almost straight up, so a thumb rolling
+        // off a key while tapping doesn't type the corner letter — and a glide is never mistaken for one
+        val flickZone = k.hint != null && upDist > k.rect.height() * 0.7f &&
+            side < (if (canGlide) min(upDist * 0.45f, k.rect.width() * 0.5f) else upDist * 0.7f) &&
+            (!canGlide || upDist < k.rect.height() * 1.9f)
+        if (flickZone) {
+            if (!p.flick) { p.flick = true; ui.removeCallbacks(p.longPress); invalidate() }
+            return
+        } else if (p.flick && (upDist < k.rect.height() * 0.4f || canGlide)) {
+            p.flick = false; invalidate()
+        }
+        if (p.flick || lifting) return
+        val outX = max(0f, max(k.hit.left - x, x - k.hit.right))
+        val outY = max(0f, max(k.hit.top - y, y - k.hit.bottom))
+        val left = outX > k.rect.width() * 0.4f || outY > k.rect.height() * 0.4f
+        if (canGlide) {
+            // the finger travelled into another key without lifting: it is drawing a word
+            if (left && hypot(x - p.downX, y - p.downY) > k.rect.width() * 0.85f) startGlide(p)
+            return
+        }
+        // a thumb rolls as it lifts and the last reported point jumps: never change the letter during
+        // a quick tap — only a held, deliberate slide
+        if (SystemClock.uptimeMillis() - p.downTime > 140) {
+            val nk = if (left) keyAt(x, y) else null
+            if (nk != null && nk !== k && nk.type == KeyType.CHAR) {
+                k.pressTarget = 0f
+                nk.pressTarget = 1f
+                p.key = nk
+                p.previewKey = nk
+                ui.removeCallbacks(p.longPress)
+                if (nk.popup.isNotEmpty() || nk.hint != null) ui.postDelayed(p.longPress, (settings?.longPressMs ?: 320).toLong())
+                kick()
+            }
+        }
+    }
+
+    private fun startGlide(p: Ptr) {
+        ui.removeCallbacks(p.longPress)
+        p.mode = PMode.GLIDE
+        p.key?.pressTarget = 0f
+        p.previewKey = null
+        trailCount = 0
+        for (i in 0 until p.pathN) trailAdd(p.path[i * 2], p.path[i * 2 + 1])
+        listener?.onKeyFeedback(null, FEEDBACK_TICK)
+        invalidate()
+    }
+
+    private fun finishGlide(p: Ptr) {
+        val l = layout ?: return
+        // everything in key units, the way the decoder knows the layout
+        val unitW = keyUnitW()
+        if (unitW <= 0f || p.pathN < 2) return
+        val centers = HashMap<Char, Pt>()
+        var rowTop = Float.MAX_VALUE
+        for (k in l.allKeys) if (isLetterKey(k)) rowTop = min(rowTop, k.rect.centerY())
+        for (k in l.allKeys) {
+            if (!isLetterKey(k)) continue
+            val c = Pt((k.rect.centerX() - keysArea.left) / unitW, (k.rect.centerY() - rowTop) / rowPitch)
+            centers[k.output[0].lowercaseChar()] = c
+            // letters that live on a key's corner (ض on ص, آ on ا…) sit on that same key
+            k.hint?.let { h -> if (h.length == 1 && h[0].isLetter()) centers.putIfAbsent(h[0], c) }
+            for (alt in k.popup) if (alt.length == 1 && alt[0].isLetter()) centers.putIfAbsent(alt[0].lowercaseChar(), c)
+        }
+        val pts = FloatArray(p.pathN * 2)
+        for (i in 0 until p.pathN) {
+            val px = p.path[i * 2]; val py = p.path[i * 2 + 1]
+            pts[i * 2] = (correctedX(px, py) - keysArea.left) / unitW
+            pts[i * 2 + 1] = (correctedY(px, py) - rowTop) / rowPitch
+        }
+        val under = keyAt(p.x, p.y)?.takeIf { isLetterKey(it) }
+        listener?.onGlide(pts, centers, rowPitch / unitW, under?.output)
     }
 
     private fun up(p: Ptr) {
@@ -1400,7 +1444,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
                         when (k.type) {
                             KeyType.CHAR, KeyType.ZWNJ -> { commitChar(p); learnTouch(p) }
                             KeyType.SPACE -> if (!p.longFired) listener?.onSpace()
-                            KeyType.ENTER -> listener?.onEnter()
+                            KeyType.ENTER -> if (!p.longFired) listener?.onEnter()
                             KeyType.SYMBOLS, KeyType.SYMBOLS2, KeyType.LETTERS -> listener?.onSwitchPage(k.type)
                             KeyType.LANG -> if (!p.longFired) listener?.onLang()
                             KeyType.EMOJI -> if (!p.longFired) listener?.onToolbar(Toolbar.EMOJI)
@@ -1410,6 +1454,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
                 }
                 p.previewKey = null
             }
+            PMode.GLIDE -> finishGlide(p)
             PMode.SLIDE -> {
                 val k = p.key
                 p.previewKey = null
@@ -1435,9 +1480,15 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
                 p.key?.pressTarget = 0f
                 listener?.onDeleteWords(p.swipeWords, true)
             }
-            PMode.PANEL_TAP, PMode.PANEL_SCROLL, PMode.PANEL_KEY -> panelUp(p)
+            PMode.PANEL -> {
+                val v = velocity
+                var vx = 0f; var vy = 0f
+                if (v != null) { v.computeCurrentVelocity(1000); vx = v.getXVelocity(p.id); vy = v.getYVelocity(p.id) }
+                panel?.up(p.x, p.y, vx, vy)
+            }
             PMode.NONE -> {}
         }
+        invalidate()
         kick()
     }
 
@@ -1503,13 +1554,6 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
             val s = suggestions.slots.getOrNull(p.stripIndex) ?: return
             listener?.onSuggestionLongPress(s)
             p.stripIndex = -1
-            return
-        }
-        if (p.mode == PMode.PANEL_TAP) {
-            // long-press on a clipboard card pins it
-            pressedCard?.let { clipboardStore?.togglePin(it.item); cardCache.clear(); listener?.onKeyFeedback(null, FEEDBACK_HEAVY) }
-            pressedCard = null
-            p.mode = PMode.NONE
             invalidate()
             return
         }
@@ -1517,10 +1561,13 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         when (k.type) {
             KeyType.SPACE -> startTrackpad(p)
             KeyType.LANG -> { k.pressTarget = 0f; listener?.onLangLongPress() }
+            // holding enter always makes a new line, even where a tap would send
+            KeyType.ENTER -> { listener?.onKeyFeedback(null, FEEDBACK_HEAVY); listener?.onChar("\n", true) }
             KeyType.CHAR, KeyType.ZWNJ, KeyType.EMOJI -> {
                 if (p.flick) return
                 val items = popupItems(p)
                 if (items.isEmpty()) return
+                p.pathN = 0
                 if (items.size == 1 && k.hint != null && k.popup.size <= 1) {
                     // a single alternate: just switch the preview to it, typed on release
                     p.flick = true
@@ -1533,6 +1580,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
                 p.popupIndex = 0
                 p.previewKey = null
                 layoutPopup(p)
+                popupT.snap(0f)
                 listener?.onKeyFeedback(null, FEEDBACK_TICK)
                 kick()
             }
@@ -1552,7 +1600,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         ui.postDelayed(p.repeater, delay)
     }
 
-    // --- space trackpad (iOS-style)
+    // --- space trackpad
 
     private fun startTrackpad(p: Ptr) {
         if (p.mode == PMode.TRACKPAD) return
@@ -1680,7 +1728,10 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
         val t = p.toolbar
         if (t != null) {
             val r = toolbarBtns.firstOrNull { it.first == t }?.second
-            if (r == null || r.contains(p.x, p.y) || abs(p.y - p.downY) < 30 * dp) listener?.onToolbar(t)
+            if (r == null || r.contains(p.x, p.y) || abs(p.y - p.downY) < 30 * dp) {
+                if (t == Toolbar.TOGGLE) { toolbarOpen = !toolbarOpen; updateStripTarget() }
+                else listener?.onToolbar(t)
+            }
             return
         }
         if (p.longFired) return
@@ -1688,102 +1739,17 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
             if (!p.stripScrolled && p.stripIndex >= SEARCH_HIT) searchResults.getOrNull(p.stripIndex - SEARCH_HIT)?.let { listener?.onEmoji(it) }
             return
         }
-        if (mode == Mode.EMOJI) {
-            val secs = sections()
-            if (p.stripIndex in secs.indices) {
-                scroller.forceFinished(true)
-                panelScroll = secs[p.stripIndex].top.coerceIn(0f, maxPanelScroll())
-                invalidate()
-            }
-            return
-        }
         if (p.stripIndex == 100) { clipChip?.let { listener?.onPasteClip(it) }; return }
         val s = suggestions.slots.getOrNull(p.stripIndex) ?: return
         listener?.onSuggestion(s)
     }
-
-    // --- panels
-
-    private fun panelDown(p: Ptr, x: Float, y: Float) {
-        val k = panelKeys.firstOrNull { it.hit.contains(x, y) }
-        if (k != null) {
-            p.key = k
-            p.mode = PMode.PANEL_KEY
-            k.pressTarget = 1f
-            listener?.onKeyFeedback(k, FEEDBACK_DOWN)
-            if (k.type == KeyType.DELETE) {
-                listener?.onDelete(0)
-                ui.postDelayed(p.repeater, 380)
-                p.mode = PMode.KEY // reuse the repeat logic
-            }
-            kick()
-            return
-        }
-        scroller.forceFinished(true)
-        p.mode = PMode.PANEL_TAP
-        if (mode == Mode.EMOJI) {
-            val hit = emojiAt(x, y)
-            pressedEmoji = hit?.first; pressedEmojiSection = hit?.second
-        } else {
-            pressedCard = cardAt(x, y)
-            if (pressedCard != null) ui.postDelayed(p.longPress, 480)
-        }
-        invalidate()
-    }
-
-    private fun panelMove(p: Ptr, dx: Float, dy: Float) {
-        if (p.mode == PMode.PANEL_TAP && abs(p.y - p.downY) > 8 * dp) {
-            p.mode = PMode.PANEL_SCROLL
-            pressedEmoji = null; pressedCard = null
-            ui.removeCallbacks(p.longPress)
-        }
-        if (p.mode == PMode.PANEL_SCROLL) {
-            panelScroll = (panelScroll - dy).coerceIn(0f, maxPanelScroll())
-            invalidate()
-        }
-    }
-
-    private fun panelUp(p: Ptr) {
-        when (p.mode) {
-            PMode.PANEL_KEY -> {
-                val k = p.key ?: return
-                k.pressTarget = 0f
-                when (k.type) {
-                    KeyType.LETTERS -> listener?.onToolbar(Toolbar.CLOSE_PANEL)
-                    KeyType.SPACE -> listener?.onSpace()
-                    else -> {}
-                }
-            }
-            PMode.PANEL_TAP -> {
-                if (mode == Mode.EMOJI) {
-                    pressedEmoji?.let { listener?.onEmoji(it) }
-                    pressedEmoji = null
-                } else {
-                    pressedCard?.let { listener?.onPasteClip(it.item.text) }
-                    pressedCard = null
-                }
-            }
-            PMode.PANEL_SCROLL -> {
-                val v = velocity
-                if (v != null) {
-                    v.computeCurrentVelocity(1000)
-                    val vy = -v.getYVelocity(p.id)
-                    scroller.fling(0, panelScroll.toInt(), 0, vy.toInt(), 0, 0, 0, maxPanelScroll().toInt())
-                }
-            }
-            else -> {}
-        }
-        invalidate()
-        kick()
-    }
-
-    // clipboard "x" removal is offered via long-press pin toggle; clear-all from the header.
 
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
         cancelAllPointers()
         Choreographer.getInstance().removeFrameCallback(frame)
         animating = false
+        updateLiveLight()
     }
 
     companion object {
@@ -1794,6 +1760,7 @@ class KeyboardView(context: Context, private val glass: GlassRenderer) : View(co
 
         /** strip index of the first emoji search match (indexes below are other strip targets) */
         private const val SEARCH_HIT = 1000
+        private const val TRAIL_MS = 380f
 
         private const val ZONE_ROWS = 4
         private const val ZONE_COLS = 3

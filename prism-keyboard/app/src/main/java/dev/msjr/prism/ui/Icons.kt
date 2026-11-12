@@ -180,4 +180,118 @@ object Icons {
         c.drawLine(cx - w * 0.7f, cy - h / 2, cx + w * 0.7f, cy - h / 2, p)
         c.drawLine(cx - w * 0.2f, cy - h / 2 - s * 0.05f, cx + w * 0.2f, cy - h / 2 - s * 0.05f, p)
     }
+
+    // ------------------------------------------------------------------ toolbar & editing icons
+
+    /** A plain arrow: [dx], [dy] is the direction it points (one of them 0). */
+    fun arrow(c: Canvas, cx: Float, cy: Float, s: Float, p: Paint, dx: Int, dy: Int) {
+        val a = s * 0.17f; val h = s * 0.11f
+        val fx = dx.toFloat(); val fy = dy.toFloat()
+        c.drawLine(cx - fx * a, cy - fy * a, cx + fx * a, cy + fy * a, p)
+        // the head: two short strokes back from the tip
+        val tx = cx + fx * a; val ty = cy + fy * a
+        c.drawLine(tx, ty, tx - fx * h - fy * h, ty - fy * h - fx * h, p)
+        c.drawLine(tx, ty, tx - fx * h + fy * h, ty - fy * h + fx * h, p)
+    }
+
+    /** Arrow to a wall: jump to the start / end of the line. */
+    fun arrowToEdge(c: Canvas, cx: Float, cy: Float, s: Float, p: Paint, dx: Int) {
+        arrow(c, cx - dx * s * 0.03f, cy, s, p, dx, 0)
+        val x = cx + dx * s * 0.21f
+        c.drawLine(x, cy - s * 0.13f, x, cy + s * 0.13f, p)
+    }
+
+    /** Text cursor between two little arrows: the editing panel. */
+    fun editCursor(c: Canvas, cx: Float, cy: Float, s: Float, p: Paint) {
+        val h = s * 0.17f; val w = s * 0.06f
+        c.drawLine(cx, cy - h, cx, cy + h, p)
+        c.drawLine(cx - w, cy - h, cx + w, cy - h, p)
+        c.drawLine(cx - w, cy + h, cx + w, cy + h, p)
+        val a = s * 0.07f; val o = s * 0.19f
+        c.drawLine(cx - o, cy, cx - o + a, cy - a, p); c.drawLine(cx - o, cy, cx - o + a, cy + a, p)
+        c.drawLine(cx + o, cy, cx + o - a, cy - a, p); c.drawLine(cx + o, cy, cx + o - a, cy + a, p)
+    }
+
+    fun mic(c: Canvas, cx: Float, cy: Float, s: Float, p: Paint) {
+        val w = s * 0.075f
+        r.set(cx - w, cy - s * 0.2f, cx + w, cy + s * 0.04f)
+        c.drawRoundRect(r, w, w, p)
+        r.set(cx - s * 0.14f, cy - s * 0.16f, cx + s * 0.14f, cy + s * 0.12f)
+        c.drawArc(r, 20f, 140f, false, p)
+        c.drawLine(cx, cy + s * 0.12f, cx, cy + s * 0.2f, p)
+    }
+
+    fun check(c: Canvas, cx: Float, cy: Float, s: Float, p: Paint) {
+        c.drawLine(cx - s * 0.16f, cy, cx - s * 0.04f, cy + s * 0.12f, p)
+        c.drawLine(cx - s * 0.04f, cy + s * 0.12f, cx + s * 0.18f, cy - s * 0.12f, p)
+    }
+
+    fun chevronDown(c: Canvas, cx: Float, cy: Float, s: Float, p: Paint) {
+        val a = s * 0.14f
+        c.drawLine(cx - a, cy - a * 0.45f, cx, cy + a * 0.55f, p)
+        c.drawLine(cx, cy + a * 0.55f, cx + a, cy - a * 0.45f, p)
+    }
+
+    fun copy(c: Canvas, cx: Float, cy: Float, s: Float, p: Paint) {
+        val w = s * 0.24f; val h = s * 0.3f; val o = s * 0.05f
+        r.set(cx - w / 2 + o, cy - h / 2 + o, cx + w / 2 + o, cy + h / 2 + o)
+        c.drawRoundRect(r, s * 0.04f, s * 0.04f, p)
+        path.reset()
+        path.moveTo(cx - w / 2 - o, cy + h / 2 - o * 1.6f)
+        path.lineTo(cx - w / 2 - o, cy - h / 2 - o)
+        path.lineTo(cx + w / 2 - o * 1.6f, cy - h / 2 - o)
+        c.drawPath(path, p)
+    }
+
+    fun cut(c: Canvas, cx: Float, cy: Float, s: Float, p: Paint) {
+        val rr = s * 0.06f
+        c.drawCircle(cx - s * 0.1f, cy + s * 0.13f, rr, p)
+        c.drawCircle(cx + s * 0.1f, cy + s * 0.13f, rr, p)
+        c.drawLine(cx - s * 0.07f, cy + s * 0.08f, cx + s * 0.1f, cy - s * 0.2f, p)
+        c.drawLine(cx + s * 0.07f, cy + s * 0.08f, cx - s * 0.1f, cy - s * 0.2f, p)
+    }
+
+    fun selectAll(c: Canvas, cx: Float, cy: Float, s: Float, p: Paint) {
+        val a = s * 0.18f; val k = s * 0.07f
+        // four corners of a frame and a filled block inside
+        c.drawLine(cx - a, cy - a, cx - a + k, cy - a, p); c.drawLine(cx - a, cy - a, cx - a, cy - a + k, p)
+        c.drawLine(cx + a, cy - a, cx + a - k, cy - a, p); c.drawLine(cx + a, cy - a, cx + a, cy - a + k, p)
+        c.drawLine(cx - a, cy + a, cx - a + k, cy + a, p); c.drawLine(cx - a, cy + a, cx - a, cy + a - k, p)
+        c.drawLine(cx + a, cy + a, cx + a - k, cy + a, p); c.drawLine(cx + a, cy + a, cx + a, cy + a - k, p)
+        r.set(cx - a * 0.45f, cy - a * 0.45f, cx + a * 0.45f, cy + a * 0.45f)
+        c.drawRoundRect(r, s * 0.02f, s * 0.02f, p)
+    }
+
+    /** Selection brackets around a cursor: start / stop selecting with the arrows. */
+    fun select(c: Canvas, cx: Float, cy: Float, s: Float, p: Paint) {
+        val h = s * 0.16f; val o = s * 0.14f; val k = s * 0.05f
+        c.drawLine(cx - o, cy - h, cx - o, cy + h, p)
+        c.drawLine(cx - o, cy - h, cx - o + k, cy - h, p); c.drawLine(cx - o, cy + h, cx - o + k, cy + h, p)
+        c.drawLine(cx + o, cy - h, cx + o, cy + h, p)
+        c.drawLine(cx + o, cy - h, cx + o - k, cy - h, p); c.drawLine(cx + o, cy + h, cx + o - k, cy + h, p)
+        c.drawLine(cx - k, cy, cx + k, cy, p)
+    }
+
+    /** A curved arrow turning back: undo (mirrored = redo). */
+    fun undo(c: Canvas, cx: Float, cy: Float, s: Float, p: Paint, redo: Boolean) {
+        val d = if (redo) -1f else 1f
+        val rad = s * 0.14f
+        r.set(cx - rad, cy - rad * 0.7f, cx + rad, cy + rad * 1.3f)
+        if (redo) c.drawArc(r, 180f, 200f, false, p) else c.drawArc(r, 160f, 200f, false, p)
+        val tx = cx - d * rad; val ty = cy + rad * 0.3f
+        c.drawLine(tx, ty, tx - d * s * 0.02f, ty - s * 0.12f, p)
+        c.drawLine(tx, ty, tx + d * s * 0.11f, ty - s * 0.035f, p)
+    }
+
+    /** The Prism mark: a small prism splitting a ray. */
+    fun prism(c: Canvas, cx: Float, cy: Float, s: Float, p: Paint) {
+        val a = s * 0.2f
+        path.reset()
+        path.moveTo(cx, cy - a)
+        path.lineTo(cx + a, cy + a * 0.8f)
+        path.lineTo(cx - a, cy + a * 0.8f)
+        path.close()
+        c.drawPath(path, p)
+        c.drawLine(cx - a * 0.2f, cy + a * 0.15f, cx + a * 0.35f, cy + a * 0.15f, p)
+    }
 }

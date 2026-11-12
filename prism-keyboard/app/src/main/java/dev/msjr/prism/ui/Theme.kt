@@ -63,7 +63,15 @@ class Theme(
         )
 
         val ALL = listOf(
-            // the first two are what "auto" picks for night and day
+            // the first two are what "auto" picks for night and day: calm, almost colourless glass
+            Theme("graphite", "گرافیت", "Graphite", true,
+                intArrayOf(c(0xFF16181D), c(0xFF0A0B0E)),
+                intArrayOf(c(0xFF55637F), c(0xFF2F3644), c(0xFF7386AD), c(0xFF23272F)),
+                c(0xFF8FB4FF), Backdrop.AURORA, keyColor = c(0xFFE8EEFF), vivid = 0.8f),
+            Theme("pearl", "مروارید", "Pearl", false,
+                intArrayOf(c(0xFFF4F5F8), c(0xFFE4E7EE)),
+                intArrayOf(c(0xFFCFD9EC), c(0xFFF7EEE6), c(0xFFC6D2E6), c(0xFFFFFFFF)),
+                c(0xFF3D6BF5), Backdrop.AURORA, vivid = 0.9f),
             Theme("aurora_night", "شفق شب", "Aurora Night", true,
                 intArrayOf(c(0xFF0B0F1E), c(0xFF070912)),
                 intArrayOf(c(0xFF6C5CE7), c(0xFF00C2FF), c(0xFFFF5E9C), c(0xFF2EE59D)),
@@ -135,12 +143,30 @@ class Theme(
         )
 
         fun resolve(ctx: Context, id: String): Theme {
-            if (id == "auto") {
-                val night = (ctx.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
-                    Configuration.UI_MODE_NIGHT_YES
-                return if (night) ALL[0] else ALL[1]
-            }
+            val night = (ctx.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+                Configuration.UI_MODE_NIGHT_YES
+            if (id == "auto") return if (night) ALL[0] else ALL[1]
+            if (id == "dynamic") return dynamic(ctx, night)
             return ALL.firstOrNull { it.id == id } ?: ALL[0]
+        }
+
+        /** The phone's own wallpaper colours (Android 12+); the calm pair on older phones. */
+        fun dynamic(ctx: Context, night: Boolean): Theme {
+            if (android.os.Build.VERSION.SDK_INT < 31) return if (night) ALL[0] else ALL[1]
+            fun col(id: Int) = ctx.getColor(id)
+            return try {
+                if (night) Theme("dynamic_n", "رنگ گوشی", "Phone colours", true,
+                    intArrayOf(col(android.R.color.system_neutral1_900), col(android.R.color.system_neutral2_900)),
+                    intArrayOf(col(android.R.color.system_accent1_500), col(android.R.color.system_accent2_600),
+                        col(android.R.color.system_accent3_500), col(android.R.color.system_accent1_700)),
+                    col(android.R.color.system_accent1_200), Backdrop.AURORA,
+                    keyColor = col(android.R.color.system_accent1_100), vivid = 0.85f)
+                else Theme("dynamic_d", "رنگ گوشی", "Phone colours", false,
+                    intArrayOf(col(android.R.color.system_neutral1_50), col(android.R.color.system_neutral2_100)),
+                    intArrayOf(col(android.R.color.system_accent1_200), col(android.R.color.system_accent2_200),
+                        col(android.R.color.system_accent3_200), col(android.R.color.system_accent1_100)),
+                    col(android.R.color.system_accent1_600), Backdrop.AURORA)
+            } catch (_: Throwable) { if (night) ALL[0] else ALL[1] }
         }
     }
 }

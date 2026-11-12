@@ -11,7 +11,7 @@ import kotlin.math.min
 import kotlin.math.sqrt
 
 class Suggestion(val text: String, val kind: Kind, val score: Float = 0f) {
-    enum class Kind { TYPED, WORD, CORRECTION, PREDICTION, LAYOUT_FIX, SHORTCUT, EMOJI }
+    enum class Kind { TYPED, WORD, CORRECTION, PREDICTION, LAYOUT_FIX, SHORTCUT, EMOJI, FINGLISH, EXTRA }
 }
 
 /** What the strip shows: [left, center, right]; center is the best guess. */
@@ -70,6 +70,22 @@ class SuggestionEngine(private val ctx: Context) {
         return index.search(query, limit)
     }
 
+    var finglish: Boolean
+        get() = core.finglish
+        set(v) { core.finglish = v }
+
+    /** Which word a finger drew across the keys (see [GlideDecoder]); the answer arrives on the main thread. */
+    fun glide(path: FloatArray, centers: Map<Char, Pt>, aspect: Float, prev: String?, lang: String, callback: (List<GlideDecoder.Candidate>) -> Unit) {
+        worker.post {
+            val res = try { core.glide(path, centers, aspect, prev, lang) } catch (_: Throwable) { emptyList() }
+            main.post { callback(res) }
+        }
+    }
+
+    /** The same, answered at once on the calling thread (a few milliseconds). */
+    fun glideNow(path: FloatArray, centers: Map<Char, Pt>, aspect: Float, prev: String?, lang: String): List<GlideDecoder.Candidate> =
+        core.glide(path, centers, aspect, prev, lang)
+
     /** See [SuggestionCore.letterWeights]. Fast; main-thread safe. */
     fun letterWeights(word: String, prev: String?, cands: List<String>): FloatArray? = core.letterWeights(word, prev, cands)
 
@@ -118,6 +134,7 @@ class SuggestionCore(val userFa: UserDictionary, val userEn: UserDictionary) {
     @Volatile var emojiFa: EmojiIndex? = null
     @Volatile var emojiEn: EmojiIndex? = null
     @Volatile var shortcuts: Map<String, String> = emptyMap()
+    @Volatile var finglish = true
     private val proximity: Map<String, Map<Char, Pt>> = mapOf("fa" to KeyGeometry.centers("fa"), "en" to KeyGeometry.centers("en"))
 
     fun user(lang: String) = if (lang == "fa") userFa else userEn
@@ -133,6 +150,26 @@ class SuggestionCore(val userFa: UserDictionary, val userEn: UserDictionary) {
         // the first letter of a word says less about what's coming: let the finger count for more
         if (word.isEmpty()) for (i in out.indices) out[i] *= 0.6f
         return out
+    }
+
+    /** The words a glide across the keys most likely drew, best first. */
+    fun glide(path: FloatArray, centers: Map<Char, Pt>, aspect: Float, prevRaw: String?, lang: String): List<GlideDecoder.Candidate> {
+        val dict = (if (lang == "fa") dictFa else dictEn) ?: return emptyList()
+        val lm = lm(lang)
+        val ctx = if (lm != null) context(lm, dict, prevRaw, lang) else -1
+        val user = user(lang)
+        val prev = prevRaw?.let { key(it, lang) }
+        val mine = user.allKeys().filter { it.second >= 2 || dict.indexOf(it.first) >= 0 }.map { Triple(it.first, user.displayOf(it.first), it.second) }
+        return GlideDecoder.decode(path, centers, aspect, dict.keys, dict.words, dict.freqs,
+            bonus = { idx ->
+                var b = 0f
+                if (lm != null && ctx >= 0) b += lm.bonus(ctx, idx).coerceIn(-LM_CLAMP_DOWN, LM_CLAMP_UP)
+                val k = dict.keys[idx]
+                val uc = user.count(k)
+                if (uc > 0) b += ln(1f + uc) * 0.5f
+                if (prev != null) { val bg = user.bigram(prev, k); if (bg > 0) b += 1f + ln(1f + bg) }
+                b
+            }, user = mine)
     }
 
     fun prefixStrength(prefix: String, lang: String): Int {
@@ -496,6 +533,11 @@ class SuggestionCore(val userFa: UserDictionary, val userEn: UserDictionary) {
                 slots[2] = rest.getOrNull(0)
             }
         }
+        // Persian written in Latin letters ("salam") → offer the real thing; never over a common English word
+        if (finglish && lang == "en" && q.length >= 3 && layoutFix == null && shortcut == null && userCount == 0 && typedFreq < FINGLISH_MAX_EN_FREQ) {
+            val fa = dictFa?.let { d -> Finglish.toPersian(q, d, 1).firstOrNull() }
+            if (fa != null && fa.second >= FINGLISH_MIN_FA_FREQ) slots[2] = Suggestion(fa.first, Suggestion.Kind.FINGLISH, 0f)
+        }
         return SuggestionResult(query, slots, auto, strongValid)
     }
 
@@ -597,6 +639,10 @@ class SuggestionCore(val userFa: UserDictionary, val userEn: UserDictionary) {
         @JvmField var REAL_WORD_DIST = 0.5f
         @JvmField var REAL_WORD_MIN_LEN = 3
         @JvmField var REAL_WORD_MIN_FREQ = 60
+
+        /** Finglish: only offered for Persian words at least this common, and not over English words this common */
+        const val FINGLISH_MIN_FA_FREQ = 80
+        const val FINGLISH_MAX_EN_FREQ = 170
 
         /** words at least this common (the, من, سلام…) never get an emoji offered after them */
         const val EMOJI_MAX_WORD_FREQ = 200

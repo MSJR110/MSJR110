@@ -47,6 +47,14 @@ object Prefs {
     const val TOUCH_RESET = "touch_reset"
     const val SWIPE_DELETE = "swipe_delete"
     const val GLOW = "glow"
+    const val GLIDE = "glide"
+    const val FINGLISH = "finglish"
+    const val LIVE_LIGHT = "live_light"
+    const val SMART_EXTRAS = "smart_extras"     // calculator, today’s date
+    const val APP_LANG = "app_lang"             // remember the language per app
+    const val APP_LANGS = "app_langs"           // json: package -> "fa" | "en"
+    const val EMOJI_TONE = "emoji_tone"         // 0 = yellow, 1..5 = skin tones
+    const val EMOJI_TONES = "emoji_tones"       // json: emoji -> its own tone
     /** Signals from the settings screen to the running keyboard (value = time of the request). */
     const val USER_DICT_RESET = "user_dict_reset"
     const val CLIPBOARD_RESET = "clipboard_reset"
@@ -59,12 +67,16 @@ object Prefs {
 
     private fun migrate(p: SharedPreferences) {
         val v = p.getInt(MIGRATION, 0)
-        if (v >= 1) return
+        if (v >= 2) return
         val e = p.edit()
-        // v1: the new iPhone-style sound replaces the old default "click"
-        val s = p.getString(SOUND, null)
-        if (s == null || s == "click") e.putString(SOUND, "iphone")
-        e.putInt(MIGRATION, 1).apply()
+        if (v < 1) {
+            // v1: the new iPhone-style sound replaces the old default "click"
+            val s = p.getString(SOUND, null)
+            if (s == null || s == "click") e.putString(SOUND, "iphone")
+        }
+        // v2 (Prism 2): the glass is built around real refraction now, so it starts switched on
+        e.putBoolean(REFRACTION, true)
+        e.putInt(MIGRATION, 2).apply()
     }
 
     fun load(ctx: Context): Settings {
@@ -98,7 +110,13 @@ object Prefs {
             lang = p.getString(LANG, "fa") ?: "fa",
             font = p.getString(FONT, "vazir") ?: "vazir",
             swipeDelete = p.getBoolean(SWIPE_DELETE, true),
-            glow = p.getBoolean(GLOW, false),
+            glow = p.getBoolean(GLOW, true),
+            glide = p.getBoolean(GLIDE, true),
+            finglish = p.getBoolean(FINGLISH, true),
+            liveLight = p.getBoolean(LIVE_LIGHT, true),
+            smartExtras = p.getBoolean(SMART_EXTRAS, true),
+            appLang = p.getBoolean(APP_LANG, true),
+            emojiTone = p.getInt(EMOJI_TONE, 0),
         )
     }
 }
@@ -132,4 +150,10 @@ data class Settings(
     val font: String,
     val swipeDelete: Boolean,
     val glow: Boolean,
+    val glide: Boolean,
+    val finglish: Boolean,
+    val liveLight: Boolean,
+    val smartExtras: Boolean,
+    val appLang: Boolean,
+    val emojiTone: Int,
 )

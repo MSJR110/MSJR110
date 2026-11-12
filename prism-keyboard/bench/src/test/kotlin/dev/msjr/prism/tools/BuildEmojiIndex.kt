@@ -1,6 +1,5 @@
 package dev.msjr.prism.tools
 
-import dev.msjr.prism.data.EmojiData
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 import java.io.File
@@ -32,7 +31,7 @@ class BuildEmojiIndex {
             if (m.groupValues[2].isNotEmpty()) names[cp] = text else keywords[cp] = text
         }
         // the panel's own emoji, in panel order (most used first), matched without variation selectors
-        val panel = EmojiData.categories.flatMap { it.items }.distinct()
+        val panel = File("../app/src/main/assets/emoji/all.txt").readLines().filter { it.isNotEmpty() && it[0] != '@' }.map { it.substringBefore('	') }.distinct()
         val panelForm = panel.associateBy { strip(it) }
         // order: the most used emoji worldwide first, then the panel order
         val rank = HashMap<String, Int>().also { r ->
