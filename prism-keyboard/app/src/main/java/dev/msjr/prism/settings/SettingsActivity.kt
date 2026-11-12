@@ -87,7 +87,7 @@ class SettingsActivity : Activity() {
         if (Build.VERSION.SDK_INT >= 23) window.decorView.systemUiVisibility = if (night) 0 else View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or
             (if (Build.VERSION.SDK_INT >= 26) View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR else 0)
         root.layoutDirection = View.LAYOUT_DIRECTION_RTL
-        val scroll = ScrollView(this).apply { isFillViewport = true; clipToPadding = false }
+        val scroll = ScrollView(this).apply { isFillViewport = true; clipToPadding = true; isVerticalScrollBarEnabled = false }
         content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding((18 * dp).toInt(), (24 * dp).toInt(), (18 * dp).toInt(), (40 * dp).toInt())

@@ -4,6 +4,7 @@
 # is the way to update the phone without losing learned words.)
 set -e
 cd "$(dirname "$0")/../.."
+sleep 10
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
 RID=$(gh run list --branch "$BRANCH" --limit 1 --json databaseId -q '.[0].databaseId')
 gh run watch "$RID" --exit-status >/dev/null 2>&1 || { echo "BUILD FAILED $RID"; gh run view "$RID" --log-failed | grep -E "e: |error:|What went wrong" | head -30; exit 1; }
