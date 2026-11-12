@@ -181,6 +181,7 @@ internal class EmojiPanel(host: KeyboardView) : Panel(host) {
     private var toneIndex = 0
     private val toneRect = RectF()
     private var toneCell = 0f
+    private var toneMoved = false
     private val toneT = Spring(0f, stiffness = 1300f, damping = 0.74f)
 
     fun refresh() { sections = null }
@@ -379,6 +380,7 @@ internal class EmojiPanel(host: KeyboardView) : Panel(host) {
         toneRect.set(left, top, left + w, top + h)
         toneItem = item
         toneIndex = Emoji.toneOf(item)
+        toneMoved = false
         toneT.snap(0f)
         host.listener?.onKeyFeedback(null, KeyboardView.FEEDBACK_HEAVY)
         host.kick()
@@ -406,6 +408,9 @@ internal class EmojiPanel(host: KeyboardView) : Panel(host) {
     override fun move(x: Float, y: Float) {
         if (onBar || onHeader) return
         if (toneItem != null) {
+            // the tone it already wears stays picked until the finger really moves
+            if (!toneMoved && abs(x - downX) < 7 * dp) return
+            toneMoved = true
             val i = ((x - toneRect.left - 6 * dp) / toneCell).toInt().coerceIn(0, 5)
             if (i != toneIndex) { toneIndex = i; host.listener?.onKeyFeedback(null, KeyboardView.FEEDBACK_TICK); host.invalidate() }
             return

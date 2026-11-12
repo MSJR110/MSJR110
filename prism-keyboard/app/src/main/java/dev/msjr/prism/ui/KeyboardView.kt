@@ -591,7 +591,7 @@ class KeyboardView(context: Context, val glass: GlassRenderer) : View(context) {
     internal fun tintFor(k: Key, th: Theme): Pair<Int, Float> {
         return when {
             // enter always wears the theme's colour; fully when it sends/searches/goes
-            k.type == KeyType.ENTER -> th.accent to (if (enterHasAction()) 0.62f else if (th.dark) 0.34f else 0.30f)
+            k.type == KeyType.ENTER -> th.accent to (if (enterHasAction()) 0.66f else if (th.dark) 0.36f else 0.46f)
             k.type == KeyType.SHIFT && shiftState != 0 -> Color.WHITE to (if (th.dark) 0.55f else 0.95f)
             k.isModifier && k.type != KeyType.ZWNJ && k.type != KeyType.EMOJI -> tintOf(th.modTint)
             else -> tintOf(th.keyTint)

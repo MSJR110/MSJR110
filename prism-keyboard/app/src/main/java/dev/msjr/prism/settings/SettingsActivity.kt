@@ -59,7 +59,7 @@ class SettingsActivity : Activity() {
     private val night get() = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
     private val fg get() = if (night) Color.WHITE else Color.rgb(18, 20, 28)
     private val fgDim get() = if (night) Color.argb(160, 255, 255, 255) else Color.argb(150, 18, 20, 28)
-    private val accent get() = if (night) 0xFF8B7CFF.toInt() else 0xFF6C5CE7.toInt()
+    private val accent get() = if (night) 0xFF6F95F2.toInt() else 0xFF3D6BF5.toInt()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -84,6 +84,8 @@ class SettingsActivity : Activity() {
     private fun build() {
         val root = FrameLayout(this)
         root.background = AuroraDrawable(Theme.resolve(this, "auto"))
+        if (Build.VERSION.SDK_INT >= 23) window.decorView.systemUiVisibility = if (night) 0 else View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or
+            (if (Build.VERSION.SDK_INT >= 26) View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR else 0)
         root.layoutDirection = View.LAYOUT_DIRECTION_RTL
         val scroll = ScrollView(this).apply { isFillViewport = true; clipToPadding = false }
         content = LinearLayout(this).apply {
@@ -134,47 +136,55 @@ class SettingsActivity : Activity() {
             c.addView(label("تم"))
             c.addView(themePicker())
             c.addView(label("پس‌زمینه"))
-            c.addView(chips(Prefs.BG_MODE, listOf("aurora" to "نورهای شفق", "image" to "عکس خودم"), "aurora") { v ->
+            c.addView(chips(Prefs.BG_MODE, listOf("aurora" to "طرح خود تم", "image" to "عکس خودم"), "aurora") { v ->
                 if (v == "image") pickImage()
             })
             c.addView(button("انتخاب عکس پس‌زمینه") { pickImage() })
             c.addView(slider("شدت شیشه", Prefs.GLASS_STRENGTH, 70, 0, 100))
-            c.addView(toggle("شکست نور (لیکوئید گلس واقعی)", "دکمه‌ها پس‌زمینه رو مثل شیشه خم می‌کنن", Prefs.REFRACTION, true))
-            c.addView(toggle("نور زیر انگشت", "یه هاله‌ی نرم دنبال انگشتت میاد", Prefs.GLOW, false))
+            c.addView(toggle("شکست نور (لیکوئید گلس واقعی)", "هر کلید یه عدسیه: وسطش شفاف، لبه‌هاش پس‌زمینه رو خم می‌کنه", Prefs.REFRACTION, true))
+            c.addView(toggle("نور زنده", "گوشی رو که کج می‌کنی، برق لبه‌ی شیشه‌ها دنبالش می‌چرخه", Prefs.LIVE_LIGHT, true))
+            c.addView(toggle("موج نور زیر انگشت", "هر ضربه یه حلقه‌ی نور پخش می‌کنه و یه هاله دنبال انگشتت میاد", Prefs.GLOW, true))
             c.addView(slider("ارتفاع کیبورد", Prefs.HEIGHT, 100, 80, 130, suffix = "٪"))
             c.addView(toggle("ردیف اعداد", "یه ردیف عدد بالای حروف", Prefs.NUMBER_ROW, false))
-            c.addView(button("برداشتن دکمه‌ی ⌨ زیر کیبورد") {
-                toast("بقیه‌ی کیبوردها (مثل کیبورد سامسونگ) رو خاموش کن تا فقط Prism بمونه")
-                try {
-                    startActivity(Intent(android.provider.Settings.ACTION_INPUT_METHOD_SETTINGS))
-                } catch (_: Throwable) { }
-            })
-            c.addView(toggle("پیش‌نمایش حباب کلید", "حباب بزرگ بالای کلید موقع لمس", Prefs.KEY_PREVIEW, true))
+            c.addView(toggle("حباب کلید", "حباب شیشه‌ای که موقع لمس از خود کلید بیرون میاد", Prefs.KEY_PREVIEW, true))
             c.addView(label("فونت کلیدها"))
             c.addView(chips(Prefs.FONT, listOf("vazir" to "وزیرمتن", "system" to "فونت گوشی"), "vazir"))
+            c.addView(button("برداشتن دکمه‌ی ⌨ زیر کیبورد") {
+                toast("بقیه‌ی کیبوردها (مثل کیبورد سامسونگ) رو خاموش کن تا فقط Prism بمونه")
+                try { startActivity(Intent(SysSettings.ACTION_INPUT_METHOD_SETTINGS)) } catch (_: Throwable) { }
+            })
+        }
+
+        card("تایپ کششی و هوشمندی") { c ->
+            c.addView(toggle("تایپ کششی", "بدون برداشتن انگشت، از روی حرف‌های کلمه رد شو؛ فارسی و انگلیسی", Prefs.GLIDE, true))
+            c.addView(toggle("پیشنهاد کلمه", "نوار پیشنهاد بالای کیبورد", Prefs.SUGGESTIONS, true))
+            c.addView(toggle("فینگلیش به فارسی", "«salam» بنویس، «سلام» توی پیشنهادها میاد", Prefs.FINGLISH, true))
+            c.addView(toggle("ماشین‌حساب و تاریخ", "«۱۲×۳=» جوابش رو می‌ده؛ بعد از «امروز» تاریخ شمسی، بعد از «ساعت» ساعت", Prefs.SMART_EXTRAS, true))
+            c.addView(toggle("زبان هر برنامه یادش بمونه", "هر اپ با همون زبانی باز می‌شه که آخرین بار توش نوشتی", Prefs.APP_LANG, true))
+            c.addView(toggle("تصحیح خودکار انگلیسی", "با زدن فاصله غلط‌ها درست می‌شن (⌫ برمی‌گردونه)", Prefs.AUTOCORRECT, true))
+            c.addView(toggle("تصحیح خودکار فارسی", "غلط تایپی رو موقع اسپیس درست می‌کنه؛ با ⌫ برمی‌گرده", Prefs.AUTOCORRECT_FA, true))
+            c.addView(toggle("حرف بزرگ خودکار", "اول جمله‌های انگلیسی", Prefs.AUTOCAP, true))
+            c.addView(toggle("دو بار فاصله = نقطه", null, Prefs.DOUBLE_SPACE, true))
+            c.addView(toggle("نیم‌فاصله‌ی هوشمند", "«می خواهم» ← «می‌خواهم» و «کتاب ها» ← «کتاب‌ها»", Prefs.SMART_ZWNJ, true))
+            c.addView(toggle("اعداد فارسی", "۱۲۳ به جای 123 در کیبورد فارسی", Prefs.PERSIAN_DIGITS, true))
+            c.addView(toggle("یادگیری کلمات من", "فقط روی همین گوشی ذخیره می‌شه", Prefs.LEARN, true))
+        }
+
+        card("ایموجی") { c ->
+            c.addView(text("رنگ پوست پیش‌فرض برای دست‌ها و آدم‌ها. هر ایموجی رو هم که نگه داری، رنگ خودش رو جدا انتخاب می‌کنی و یادش می‌مونه.", 13f, color = fgDim))
+            c.addView(tonePicker())
         }
 
         card("حس و صدا") { c ->
             c.addView(slider("قدرت لرزش", Prefs.HAPTIC, 55, 0, 100, zeroLabel = "خاموش"))
             c.addView(label("صدای کلیدها"))
-            c.addView(chips(Prefs.SOUND, listOf("iphone" to "آیفونی", "click" to "کلیک", "soft" to "نرم", "glass" to "شیشه‌ای", "mech" to "مکانیکی", "system" to "سیستم", "off" to "خاموش"), "iphone"))
+            c.addView(chips(Prefs.SOUND, listOf("iphone" to "آیفونی", "click" to "کلیک", "soft" to "نرم", "glass" to "شیشه‌ای", "mech" to "مکانیکی", "system" to "صدای گوشی", "off" to "خاموش"), "iphone"))
             c.addView(slider("بلندی صدا", Prefs.SOUND_VOLUME, 55, 0, 100))
             c.addView(toggle("بی‌صدا با حالت سکوت گوشی", "وقتی گوشی روی سایلنت یا ویبره‌ست صدا نده", Prefs.SOUND_RESPECT_SILENT, true))
             c.addView(slider("مکث نگه‌داشتن کلید", Prefs.LONG_PRESS_MS, 400, 180, 650, suffix = " ms"))
             c.addView(slider("سرعت ترک‌پد اسپیس", Prefs.TRACKPAD_SPEED, 100, 50, 200, suffix = "٪"))
             c.addView(toggle("کشیدن روی پاک‌کن", "انگشت رو از ⌫ به چپ بکش تا کلمه‌ها پاک بشن", Prefs.SWIPE_DELETE, true))
             c.addView(toggle("لمس هوشمند", "کیبورد یاد می‌گیره انگشتت دقیقاً کجا می‌خوره", Prefs.ADAPTIVE_TOUCH, true))
-        }
-
-        card("نوشتن") { c ->
-            c.addView(toggle("پیشنهاد کلمه", "نوار پیشنهاد بالای کیبورد", Prefs.SUGGESTIONS, true))
-            c.addView(toggle("تصحیح خودکار انگلیسی", "با زدن فاصله غلط‌ها درست می‌شن (⌫ برمی‌گردونه)", Prefs.AUTOCORRECT, true))
-            c.addView(toggle("تصحیح خودکار فارسی", "غلط تایپی رو موقع اسپیس درست می‌کنه؛ با ⌫ برمی‌گرده", Prefs.AUTOCORRECT_FA, true))
-            c.addView(toggle("حرف بزرگ خودکار", "اول جمله‌های انگلیسی", Prefs.AUTOCAP, true))
-            c.addView(toggle("دو بار فاصله = نقطه", "مثل آیفون", Prefs.DOUBLE_SPACE, true))
-            c.addView(toggle("نیم‌فاصله‌ی هوشمند", "«می خواهم» ← «می‌خواهم» و «کتاب ها» ← «کتاب‌ها»", Prefs.SMART_ZWNJ, true))
-            c.addView(toggle("اعداد فارسی", "۱۲۳ به جای 123 در کیبورد فارسی", Prefs.PERSIAN_DIGITS, true))
-            c.addView(toggle("یادگیری کلمات من", "فقط روی همین گوشی ذخیره می‌شه", Prefs.LEARN, true))
         }
 
         card("کلیپ‌بورد") { c ->
@@ -212,20 +222,23 @@ class SettingsActivity : Activity() {
 
         card("ترفندها") { c ->
             val tips = listOf(
+                "بدون برداشتن انگشت از روی حرف‌های یه کلمه رد شو ← کل کلمه نوشته می‌شه؛ یه ⌫ کلش رو برمی‌داره",
                 "اسپیس رو نگه دار ← کیبورد تبدیل به ترک‌پد می‌شه و مکان‌نما رو جابه‌جا می‌کنی",
                 "روی اسپیس به چپ و راست بکش ← سریع مکان‌نما رو حرکت بده",
                 "از ⌫ به سمت چپ بکش ← کلمه‌به‌کلمه پاک کن، برگردی لغو می‌شه",
-                "حرف کوچیک گوشه‌ی هر کلید (مثل ض روی ص) ← کلید رو نگه دار یا رو به بالا بکش",
+                "حرف کوچیک گوشه‌ی هر کلید (مثل ض روی ص) ← کلید رو نگه دار یا صاف رو به بالا بکش",
                 "شیفت (⇧) توی فارسی ← ض غ ظ ژ ذ آ و اعراب؛ اسپیس هم نیم‌فاصله می‌شه",
                 "کلید 🙂 رو نگه دار ← نقطه، ویرگول، علامت سؤال و بقیه‌ی علامت‌ها",
-                "دو بار اسپیس ← نقطه",
+                "اینتر رو نگه دار ← خط جدید، حتی جایی که اینتر «ارسال» می‌کنه",
+                "یه ایموجیِ دست یا آدم رو نگه دار ← رنگ پوستش رو انتخاب کن",
+                "دکمه‌ی منشور کنار پیشنهادها ← تنظیمات، کلیپ‌بورد، ویرایش متن، یک‌دستی",
+                "پنل ویرایش ← فلش‌ها، انتخاب، کپی و چسباندن، برگرد و دوباره",
                 "از !#۱ بکش روی یه علامت یا عدد و ول کن ← تایپ می‌شه و برمی‌گرده به حروف",
-                "توی انگلیسی روی ردیف بالا به سمت بالا بکش ← عدد",
                 "کره‌ی 🌐 ← عوض کردن فارسی/انگلیسی؛ نگهش داری ← کیبوردهای دیگه",
                 "بعد از تصحیح خودکار، یه ⌫ بزن ← همونی که نوشتی برمی‌گرده",
                 "اگه یادت رفت زبان رو عوض کنی (مثلاً sghl) ← «سلام» توی پیشنهادها میاد",
                 "روی پیشنهاد نگه دار ← از کلمات یادگرفته‌شده حذف می‌شه",
-                "کارت کلیپ‌بورد رو نگه دار ← سنجاق می‌شه",
+                "کارت کلیپ‌بورد رو نگه دار ← سنجاق می‌شه؛ به کنار بکشش ← پاک می‌شه",
             )
             for (t in tips) c.addView(text("•  $t", 13.5f).apply { setPadding(0, (5 * dp).toInt(), 0, (5 * dp).toInt()) })
         }
@@ -403,7 +416,9 @@ class SettingsActivity : Activity() {
         val hs = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         hs.addView(row)
-        val items = listOf<Pair<String, Theme?>>("auto" to null) + Theme.ALL.map { it.id to it }
+        val items = listOf<Pair<String, Theme?>>("auto" to null) +
+            (if (Build.VERSION.SDK_INT >= 31) listOf("dynamic" to Theme.dynamic(this, night)) else emptyList()) +
+            Theme.ALL.map { it.id to it }
         val frames = ArrayList<View>()
         fun mark(sel: String) {
             for ((i, f) in frames.withIndex()) {
@@ -441,6 +456,33 @@ class SettingsActivity : Activity() {
         }
         mark(prefs.getString(Prefs.THEME, "auto") ?: "auto")
         return hs
+    }
+
+    /** The general skin tone: one hand in each of the six colours. */
+    private fun tonePicker(): View {
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, (10 * dp).toInt(), 0, 0) }
+        val hands = listOf("✋", "✋🏻", "✋🏼", "✋🏽", "✋🏾", "✋🏿")
+        val views = ArrayList<TextView>()
+        fun mark(sel: Int) {
+            for ((i, v) in views.withIndex()) v.background = if (i == sel) GradientDrawable().apply {
+                cornerRadius = 16 * dp
+                setColor(if (night) Color.argb(46, 255, 255, 255) else Color.argb(190, 255, 255, 255))
+                setStroke((2 * dp).toInt(), accent)
+            } else null
+        }
+        for ((i, h) in hands.withIndex()) {
+            val v = TextView(this).apply {
+                text = h
+                textSize = 26f
+                gravity = Gravity.CENTER
+                setPadding(0, (8 * dp).toInt(), 0, (8 * dp).toInt())
+                setOnClickListener { prefs.edit().putInt(Prefs.EMOJI_TONE, i).apply(); mark(i) }
+            }
+            row.addView(v, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            views += v
+        }
+        mark(prefs.getInt(Prefs.EMOJI_TONE, 0))
+        return row
     }
 
     // ------------------------------------------------------------------ shortcuts
